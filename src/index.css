@@ -1,0 +1,48 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply font-sans antialiased;
+  }
+}
+
+@layer components {
+  .gradient-text {
+    @apply bg-clip-text text-transparent bg-gradient-to-r from-blue-600 to-violet-600;
+  }
+  .gradient-bg {
+    @apply bg-gradient-to-br from-blue-600 via-blue-700 to-violet-700;
+  }
+  .btn-primary {
+    @apply inline-flex items-center gap-2 px-6 py-3 rounded-xl font-semibold text-white gradient-bg hover:opacity-90 transition-all duration-200 shadow-lg hover:shadow-xl active:scale-95;
+  }
+  .btn-secondary {
+    @apply inline-flex items-center gap-2 px-6 py-3 rounded-xl font-semibold border-2 border-blue-600 text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-950 dark:text-blue-400 dark:border-blue-400 transition-all duration-200 active:scale-95;
+  }
+  .tool-card {
+    @apply relative flex flex-col items-start gap-3 p-6 rounded-2xl bg-white dark:bg-gray-800 border border-gray-100 dark:border-gray-700 transition-all duration-300 cursor-pointer hover:-translate-y-1 hover:shadow-xl;
+  }
+  .section-heading {
+    @apply text-3xl md:text-4xl font-bold text-gray-900 dark:text-white;
+  }
+  .section-subheading {
+    @apply text-lg text-gray-500 dark:text-gray-400 mt-3 max-w-2xl mx-auto;
+  }
+  .upload-zone {
+    @apply relative flex flex-col items-center justify-center gap-4 p-12 rounded-2xl border-2 border-dashed border-blue-300 dark:border-blue-600 bg-blue-50/50 dark:bg-blue-950/30 hover:bg-blue-50 dark:hover:bg-blue-950/50 transition-all duration-200 cursor-pointer;
+  }
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+}
+::-webkit-scrollbar-track {
+  @apply bg-gray-100 dark:bg-gray-800;
+}
+::-webkit-scrollbar-thumb {
+  @apply bg-gray-300 dark:bg-gray-600 rounded-full;
+}
