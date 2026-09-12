@@ -1,4 +1,5 @@
 import { PDFDocument, StandardFonts, degrees, rgb } from 'pdf-lib';
+import { PDFDocument as SecurePdfDocument } from '@cantoo/pdf-lib';
 import JSZip from 'jszip';
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
 import * as XLSX from 'xlsx';
@@ -66,6 +67,61 @@ function ensureFiles(files: File[]) {
 
 async function loadPdf(file: File) {
   return PDFDocument.load(await file.arrayBuffer(), { ignoreEncryption: true });
+}
+
+/** Render every page of a PDF to JPEG blobs via pdf.js (used by compress + unlock). */
+async function renderPdfToJpegs(file: File, scale: number, quality: number, password = '') {
+  const loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(await file.arrayBuffer()), ...(password ? { password } : {}) });
+  const pdf = await loadingTask.promise;
+  const entries: ProcessedFile[] = [];
+  try {
+    for (let i = 1; i <= pdf.numPages; i += 1) {
+      const page = await pdf.getPage(i);
+      const viewport = page.getViewport({ scale });
+      const canvas = document.createElement('canvas');
+      const context = canvas.getContext('2d');
+      if (!context) throw new Error('Canvas is not available in this browser.');
+      canvas.width = Math.ceil(viewport.width);
+      canvas.height = Math.ceil(viewport.height);
+      context.fillStyle = '#ffffff';
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      await page.render({ canvasContext: context, viewport } as never).promise;
+      entries.push({ blob: await canvasToBlob(canvas, 'image/jpeg', quality), fileName: `${baseName(file.name)}-page-${i}.jpg`, mimeType: 'image/jpeg' });
+      canvas.width = 0;
+      canvas.height = 0;
+      page.cleanup();
+    }
+  } finally {
+    await loadingTask.destroy();
+  }
+  return entries;
+}
+
+/** Rebuild a PDF from rendered JPEG pages, keeping the smaller of original vs rebuilt. */
+async function rebuildPdfFromRenders(files: File[], file: File, scale: number, quality: number, suffix: string, verb: string) {
+  const entries = await renderPdfToJpegs(file, scale, quality);
+  if (!entries.length) throw new Error('This PDF has no pages to process.');
+  const doc = await PDFDocument.create();
+  for (const entry of entries) {
+    const image = await doc.embedJpg(await entry.blob.arrayBuffer());
+    const { width, height } = image.scale(1);
+    doc.addPage([width, height]).drawImage(image, { x: 0, y: 0, width, height });
+  }
+  const bytes = await doc.save({ useObjectStreams: true });
+  const rebuilt = new Blob([bytesToBlobPart(bytes)], { type: pdfMime });
+  if (rebuilt.size < file.size) {
+    return output(`${baseName(file.name)}-${suffix}.pdf`, rebuilt, `${verb} the PDF: ${formatSize(file.size)} → ${formatSize(rebuilt.size)} (${Math.round((1 - rebuilt.size / file.size) * 100)}% smaller).`, files);
+  }
+  const original = await loadPdf(file);
+  const saved = await original.save({ useObjectStreams: true });
+  const resaved = new Blob([bytesToBlobPart(saved)], { type: pdfMime });
+  return output(`${baseName(file.name)}-${suffix}.pdf`, resaved.size < file.size ? resaved : new Blob([await file.arrayBuffer()], { type: pdfMime }), `This PDF is already well optimized — kept ${resaved.size < file.size ? `a structurally resaved copy (${formatSize(resaved.size)})` : 'the original file'} at ${formatSize(Math.min(file.size, resaved.size))}. No meaningful compression was possible without visible quality loss.`, files);
+}
+
+function formatSize(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 async function savePdf(doc: PDFDocument, fileName: string, message: string, files: File[]) {
@@ -202,12 +258,14 @@ async function imagesToPdf(files: File[]) {
   const doc = await PDFDocument.create();
   for (const file of files) {
     const bytes = await file.arrayBuffer();
-    const image = file.type.includes('png') ? await doc.embedPng(bytes) : await doc.embedJpg(bytes);
+    const isPng = file.type.includes('png') || file.name.toLowerCase().endsWith('.png');
+    const image = isPng ? await doc.embedPng(bytes) : await doc.embedJpg(bytes);
     const { width, height } = image.scale(1);
     const page = doc.addPage([width, height]);
+    if (isPng) page.drawRectangle({ x: 0, y: 0, width, height, color: rgb(1, 1, 1) });
     page.drawImage(image, { x: 0, y: 0, width, height });
   }
-  return savePdf(doc, `${baseName(files[0].name)}.pdf`, `Created a PDF with ${files.length} image page${files.length > 1 ? 's' : ''}.`, files);
+  return savePdf(doc, `${baseName(files[0].name)}.pdf`, `Created a PDF with ${files.length} image page${files.length > 1 ? 's' : ''}, preserving original order and dimensions.`, files);
 }
 
 async function compressImages(files: File[], options: Options) {
@@ -252,9 +310,30 @@ async function mergePdfs(files: File[]) {
   return savePdf(merged, 'merged.pdf', `Merged ${files.length} PDFs into one document.`, files);
 }
 
-async function splitPdf(file: File) {
+async function splitPdf(file: File, options: Options) {
   const source = await loadPdf(file);
+  const pageCount = source.getPageCount();
+  const rangeText = (options.ranges ?? '').trim();
   const entries: ProcessedFile[] = [];
+
+  if (rangeText) {
+    const groups = parsePageList(rangeText, pageCount, []);
+    if (!groups.length) throw new Error('No valid page ranges found. Use formats like 1-3,5.');
+    for (const part of rangeText.split(',')) {
+      const indexes = parsePageList(part, pageCount, []);
+      if (!indexes.length) continue;
+      const doc = await copyPages(file, indexes);
+      const label = indexes.length === 1 ? `page-${indexes[0] + 1}` : `pages-${indexes[0] + 1}-${indexes[indexes.length - 1] + 1}`;
+      const bytes = await doc.save({ useObjectStreams: true });
+      entries.push({ blob: new Blob([bytesToBlobPart(bytes)], { type: pdfMime }), fileName: `${baseName(file.name)}-${label}.pdf`, mimeType: pdfMime });
+    }
+    if (!entries.length) throw new Error('No valid page ranges found. Use formats like 1-3,5.');
+    if (entries.length === 1) {
+      return output(entries[0].fileName, entries[0].blob, `Split off ${entries[0].fileName.includes('page-') ? 'the requested pages' : 'the requested range'} into a new PDF.`, [file]);
+    }
+    return zipFiles(`${baseName(file.name)}-split.zip`, entries, [file], `Split ${file.name} into ${entries.length} PDF files by your ranges.`);
+  }
+
   for (const index of source.getPageIndices()) {
     const out = await PDFDocument.create();
     const [page] = await out.copyPages(source, [index]);
@@ -266,14 +345,22 @@ async function splitPdf(file: File) {
       mimeType: pdfMime,
     });
   }
-  return zipFiles(`${baseName(file.name)}-split.zip`, entries, [file], `Split ${file.name} into ${entries.length} PDF files.`);
+  return zipFiles(`${baseName(file.name)}-split.zip`, entries, [file], `Split ${file.name} into ${entries.length} single-page PDF files.`);
 }
 
 async function rotatePdf(file: File, options: Options) {
   const doc = await loadPdf(file);
   const rotation = Number.parseInt(options.rotation ?? '90', 10) || 90;
-  doc.getPages().forEach(page => page.setRotation(degrees(rotation)));
-  return savePdf(doc, `${baseName(file.name)}-rotated.pdf`, `Rotated every page by ${rotation} degrees.`, [file]);
+  const pageCount = doc.getPageCount();
+  const targets = parsePageList(options.pages, pageCount, doc.getPageIndices());
+  if (!targets.length) throw new Error('No valid pages selected for rotation.');
+  const pages = doc.getPages();
+  targets.forEach(index => {
+    const current = pages[index].getRotation().angle ?? 0;
+    pages[index].setRotation(degrees((current + rotation) % 360));
+  });
+  const scope = targets.length === pageCount ? 'every page' : `page${targets.length === 1 ? '' : 's'} ${targets.map(i => i + 1).join(', ')}`;
+  return savePdf(doc, `${baseName(file.name)}-rotated.pdf`, `Rotated ${scope} by ${rotation} degrees.`, [file]);
 }
 
 async function deletePages(file: File, options: Options) {
@@ -373,30 +460,105 @@ async function addImageToPdf(files: File[]) {
 
 async function signPdf(file: File, options: Options) {
   const doc = await loadPdf(file);
-  const font = await doc.embedFont(StandardFonts.HelveticaBoldOblique);
-  const page = doc.getPage(0);
+  const pageCount = doc.getPageCount();
+  const pageIndex = Math.min(Math.max(1, Number.parseInt(options.signPage ?? String(pageCount), 10) || pageCount), pageCount);
+  const page = doc.getPage(pageIndex - 1);
   const { width } = page.getSize();
-  const text = options.signature || 'Signed with My PDF Desk';
-  page.drawText(text, {
-    x: 48,
-    y: 72,
-    size: 18,
-    font,
-    color: rgb(0.75, 0.1, 0.28),
-    maxWidth: width - 96,
-  });
-  page.drawText(`Date: ${new Date().toLocaleDateString()}`, {
-    x: 48,
-    y: 50,
+  const drawn: string[] = [];
+
+  if (options.signatureData?.startsWith('data:image/png')) {
+    const response = await fetch(options.signatureData);
+    const pngBytes = await response.arrayBuffer();
+    const image = await doc.embedPng(pngBytes);
+    const targetWidth = Math.min(160, width * 0.28);
+    const scaled = image.scaleToFit(targetWidth, targetWidth * 0.45);
+    page.drawImage(image, { x: 42, y: 84, width: scaled.width, height: scaled.height });
+    drawn.push('your drawn/uploaded signature image');
+  } else {
+    const font = await doc.embedFont(StandardFonts.HelveticaBoldOblique);
+    const text = options.signature || 'Signed with My PDF Desk';
+    page.drawText(text, {
+      x: 42,
+      y: 96,
+      size: 18,
+      font,
+      color: rgb(0.75, 0.1, 0.28),
+      maxWidth: width - 84,
+    });
+    drawn.push('a typed signature');
+  }
+
+  const fontPlain = await doc.embedFont(StandardFonts.Helvetica);
+  const dateLine = `Signed on ${new Date().toLocaleDateString()} with My PDF Desk`;
+  page.drawText(dateLine, {
+    x: 42,
+    y: 68,
     size: 9,
+    font: fontPlain,
     color: rgb(0.42, 0.45, 0.5),
   });
-  return savePdf(doc, `${baseName(file.name)}-signed.pdf`, 'Added a visible electronic signature block.', [file]);
+  return savePdf(doc, `${baseName(file.name)}-signed.pdf`, `Embedded ${drawn[0]} onto page ${pageIndex} of ${pageCount}.`, [file]);
+}
+
+async function protectPdf(file: File, options: Options) {
+  const password = options.password ?? '';
+  if (password.length < 4) throw new Error('Please enter a password of at least 4 characters.');
+  const source = await PDFDocument.load(await file.arrayBuffer(), { ignoreEncryption: true });
+  const secure = await SecurePdfDocument.load(await source.save({ useObjectStreams: true }));
+  secure.encrypt({
+    userPassword: password,
+    ownerPassword: options.ownerPassword || password,
+    algorithm: 'AES-256',
+  });
+  const bytes = await secure.save({ useObjectStreams: true });
+  return output(`${baseName(file.name)}-protected.pdf`, new Blob([bytesToBlobPart(bytes)], { type: pdfMime }), `Encrypted with AES-256. The PDF now requires the password to open — keep it safe, it cannot be recovered.`, [file]);
+}
+
+async function unlockPdf(file: File, options: Options) {
+  const password = options.password ?? '';
+  let parseError: unknown = null;
+  try {
+    const probeTask = pdfjsLib.getDocument({ data: new Uint8Array(await file.arrayBuffer()), ...(password ? { password } : {}) });
+    await probeTask.promise;
+    await probeTask.destroy();
+  } catch (err) {
+    parseError = err;
+  }
+  const name = nameFromError(parseError);
+  if (name === 'PasswordException') {
+    throw new Error(password
+      ? 'That password did not unlock the PDF. Please check it and try again.'
+      : 'This PDF needs its open password. Enter the password in the password field and try again.');
+  }
+  if (parseError) {
+    throw new Error('This file could not be read as a PDF. Please check the file and try again.');
+  }
+  // pdf.js ignores owner-level restrictions (an "owner password unlocked" copy) but
+  // cannot rewrite user-password encryption. Rasterize page images into a fresh,
+  // restriction-free PDF so the content is genuinely reusable.
+  const entries = await renderPdfToJpegs(file, 2, 0.88, password);
+  const doc = await PDFDocument.create();
+  for (const entry of entries) {
+    const image = await doc.embedJpg(await entry.blob.arrayBuffer());
+    const { width, height } = image.scale(1);
+    doc.addPage([width, height]).drawImage(image, { x: 0, y: 0, width, height });
+  }
+  return savePdf(doc, `${baseName(file.name)}-unlocked.pdf`, `Removed restrictions in a rebuilt ${entries.length}-page copy. Note: pages are high-quality images, so text is no longer selectable — the visual content is identical.`, [file]);
+}
+
+function nameFromError(err: unknown) {
+  return err instanceof Error ? err.name : '';
 }
 
 async function simpleResavePdf(file: File, nameSuffix: string, message: string) {
   const doc = await loadPdf(file);
   return savePdf(doc, `${baseName(file.name)}-${nameSuffix}.pdf`, message, [file]);
+}
+
+async function compressPdf(file: File, options: Options) {
+  const level = options.compression ?? 'medium';
+  const { scale, quality } = { low: { scale: 2, quality: 0.82 }, medium: { scale: 2, quality: 0.65 }, high: { scale: 1.5, quality: 0.45 } }[level] ?? { scale: 2, quality: 0.65 };
+  return rebuildPdfFromRenders([file], file, scale, quality, 'compressed', `Compressed (${level} quality)`);
 }
 
 async function batchResave(files: File[]) {
@@ -486,6 +648,11 @@ export async function processTool(slug: string, files: File[], options: Options)
   switch (slug) {
     case 'pdf-to-jpg':
       return pdfToImages(files[0], 'image/jpeg');
+    case 'protect-pdf':
+    case 'encrypt-pdf':
+      return protectPdf(files[0], options);
+    case 'unlock-pdf':
+      return unlockPdf(files[0], options);
     case 'pdf-to-png':
       return pdfToImages(files[0], 'image/png');
     case 'jpg-to-pdf':
@@ -497,7 +664,7 @@ export async function processTool(slug: string, files: File[], options: Options)
     case 'merge-pdfs':
       return mergePdfs(files);
     case 'split-pdf':
-      return splitPdf(files[0]);
+      return splitPdf(files[0], options);
     case 'rotate-pdf':
       return rotatePdf(files[0], options);
     case 'delete-pages':
@@ -516,21 +683,16 @@ export async function processTool(slug: string, files: File[], options: Options)
     case 'pdf-editor':
       return addText(files[0], options);
     case 'compress-pdf':
-      return simpleResavePdf(files[0], 'optimized', 'Optimized and resaved the PDF structure.');
+      return compressPdf(files[0], options);
     case 'batch-compress':
       return batchResave(files);
-    case 'protect-pdf':
-    case 'encrypt-pdf':
-      return watermarkPdf(files[0], { ...options, watermarkText: options.watermarkText || 'Protected Copy', opacity: options.opacity || '15' });
-    case 'unlock-pdf':
-      return simpleResavePdf(files[0], 'unlocked-copy', 'Created a clean copy of PDFs that can be opened without unsupported restrictions.');
     case 'esign-pdf':
     case 'draw-signature':
     case 'upload-signature':
     case 'digital-signature':
       return signPdf(files[0], options);
     case 'verify-signature':
-      return textToPdf('Signature verification requires certificate-chain validation. This browser tool created an audit note for the uploaded document instead.', `${baseName(files[0].name)} verification note`, files);
+      throw new Error('Verifying a digital certificate signature requires the signer\'s certificate chain and a trusted root list, which browsers cannot validate offline. Open the file in Adobe Acrobat Reader to verify signatures — all other PDF Desk tools work fully in your browser.');
     case 'ocr-pdf':
       return textToDocx(await extractPdfText(files[0]), `${baseName(files[0].name)}-ocr-text.docx`, files);
     case 'pdf-to-word':

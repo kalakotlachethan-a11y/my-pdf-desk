@@ -254,6 +254,7 @@ export default function PdfEditorPage() {
   const resizeRef = useRef<{ id: string; startX: number; startY: number; startWidth: number; startSize: number } | null>(null);
   const historyRef = useRef<{ stack: TextChange[][]; index: number }>({ stack: [[]], index: 0 });
   const changesRef = useRef<TextChange[]>([]);
+  const inlineEditDraftRef = useRef<{ id: string; text: string } | null>(null);
 
   const [pdfFile, setPdfFile] = useState<File | null>(null);
   const [pdfDoc, setPdfDoc] = useState<PdfDocumentProxy | null>(null);
@@ -447,6 +448,7 @@ export default function PdfEditorPage() {
 
   const startEditingSpan = useCallback((span: TextSpan) => {
     const existing = changesRef.current.find(change => change.sourceId === span.id);
+    inlineEditDraftRef.current = null;
     if (existing) {
       setSelection({ type: 'existing', id: span.id });
       setInlineEditId(existing.id);
@@ -461,6 +463,16 @@ export default function PdfEditorPage() {
   const addTextAt = (event: React.MouseEvent<HTMLDivElement>) => {
     if (!viewport) return;
     if (mode !== 'add-text') {
+      // Clicking the page background while the inline editor is open must COMMIT the
+      // draft (what the user typed) instead of discarding it with the unmount.
+      const draft = inlineEditDraftRef.current;
+      if (inlineEditId && draft) {
+        const current = changesRef.current.find(item => item.id === draft.id);
+        if (current && draft.text !== current.text) {
+          commit(changesRef.current.map(item => item.id === draft.id ? { ...item, text: draft.text } : item));
+        }
+        inlineEditDraftRef.current = null;
+      }
       setSelection(null);
       setInlineEditId(null);
       return;
@@ -910,11 +922,19 @@ export default function PdfEditorPage() {
                     }
                   }}
                   onBlur={event => {
-                    const nextText = (event.currentTarget.innerText ?? '').replace(/\u00a0/g, ' ');
+                    // Prefer the draft captured on input: a background-click re-render can
+                    // restore the original innerText before blur fires.
+                    const draft = inlineEditDraftRef.current;
+                    const domText = (event.currentTarget.innerText ?? '').replace(/\u00a0/g, ' ');
+                    const nextText = draft && draft.id === change.id ? draft.text : domText;
+                    inlineEditDraftRef.current = null;
                     setInlineEditId(null);
                     if (nextText !== change.text) {
                       commit(changesRef.current.map(item => item.id === change.id ? { ...item, text: nextText } : item));
                     }
+                  }}
+                  onInput={event => {
+                    inlineEditDraftRef.current = { id: change.id, text: (event.currentTarget.innerText ?? '').replace(/\u00a0/g, ' ') };
                   }}
                   onKeyDown={event => {
                     event.stopPropagation();

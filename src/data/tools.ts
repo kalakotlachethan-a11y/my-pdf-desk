@@ -42,14 +42,14 @@ export const tools: Tool[] = [
   { id: 'extract-pages', label: 'Extract Pages', description: 'Extract specific pages into a new PDF', icon: FileOutput, color: 'text-pink-600', bgColor: 'bg-pink-100 dark:bg-pink-950/40', category: 'Edit' },
 
   // Compression
-  { id: 'compress-pdf', label: 'Compress PDF', description: 'Reduce PDF file size while keeping quality', icon: Archive, color: 'text-yellow-600', bgColor: 'bg-yellow-100 dark:bg-yellow-950/40', category: 'Compress', popular: true },
+  { id: 'compress-pdf', label: 'Compress PDF', description: 'Shrink PDF size by re-encoding pages as quality-tuned images', icon: Archive, color: 'text-yellow-600', bgColor: 'bg-yellow-100 dark:bg-yellow-950/40', category: 'Compress', popular: true },
   { id: 'image-compressor', label: 'Image Compressor', description: 'Compress images without losing quality', icon: FileMinus, color: 'text-yellow-600', bgColor: 'bg-yellow-100 dark:bg-yellow-950/40', category: 'Compress' },
   { id: 'batch-compress', label: 'Batch Compress', description: 'Compress multiple PDFs at once', icon: Zap, color: 'text-amber-600', bgColor: 'bg-amber-100 dark:bg-amber-950/40', category: 'Compress', new: true },
 
   // Security
-  { id: 'protect-pdf', label: 'Protect PDF', description: 'Add password protection with AES-256 encryption', icon: Shield, color: 'text-emerald-600', bgColor: 'bg-emerald-100 dark:bg-emerald-950/40', category: 'Security', popular: true },
-  { id: 'unlock-pdf', label: 'Unlock PDF', description: 'Remove password protection from your PDF', icon: Unlock, color: 'text-emerald-600', bgColor: 'bg-emerald-100 dark:bg-emerald-950/40', category: 'Security' },
-  { id: 'encrypt-pdf', label: 'Encrypt PDF', description: 'Apply advanced encryption to your PDF', icon: Lock, color: 'text-teal-600', bgColor: 'bg-teal-100 dark:bg-teal-950/40', category: 'Security' },
+  { id: 'protect-pdf', label: 'Protect PDF', description: 'Add a real open password with AES-256 encryption', icon: Shield, color: 'text-emerald-600', bgColor: 'bg-emerald-100 dark:bg-emerald-950/40', category: 'Security', popular: true },
+  { id: 'unlock-pdf', label: 'Unlock PDF', description: 'Remove passwords and restrictions from your PDF', icon: Unlock, color: 'text-emerald-600', bgColor: 'bg-emerald-100 dark:bg-emerald-950/40', category: 'Security' },
+  { id: 'encrypt-pdf', label: 'Encrypt PDF', description: 'Apply AES-256 password encryption to your PDF', icon: Lock, color: 'text-teal-600', bgColor: 'bg-teal-100 dark:bg-teal-950/40', category: 'Security' },
   { id: 'watermark-pdf', label: 'Watermark PDF', description: 'Add text or image watermarks to your PDF', icon: Stamp, color: 'text-teal-600', bgColor: 'bg-teal-100 dark:bg-teal-950/40', category: 'Security' },
 
   // Organization
@@ -60,7 +60,7 @@ export const tools: Tool[] = [
   { id: 'ocr-pdf', label: 'OCR PDF', description: 'Extract text from scanned PDFs with OCR', icon: FileSearch, color: 'text-purple-600', bgColor: 'bg-purple-100 dark:bg-purple-950/40', category: 'Organize' },
 
   // Signature
-  { id: 'esign-pdf', label: 'e-Sign PDF', description: 'Sign PDFs electronically with your signature', icon: PenTool, color: 'text-rose-600', bgColor: 'bg-rose-100 dark:bg-rose-950/40', category: 'Sign', popular: true },
+  { id: 'esign-pdf', label: 'e-Sign PDF', description: 'Draw or type a signature and embed it in your PDF', icon: PenTool, color: 'text-rose-600', bgColor: 'bg-rose-100 dark:bg-rose-950/40', category: 'Sign', popular: true },
   { id: 'draw-signature', label: 'Draw Signature', description: 'Draw your signature with mouse or touch', icon: PenTool, color: 'text-rose-600', bgColor: 'bg-rose-100 dark:bg-rose-950/40', category: 'Sign' },
   { id: 'upload-signature', label: 'Upload Signature', description: 'Upload your signature image to PDFs', icon: ImagePlus, color: 'text-rose-600', bgColor: 'bg-rose-100 dark:bg-rose-950/40', category: 'Sign' },
   { id: 'verify-signature', label: 'Verify Signature', description: 'Verify digital signature authenticity', icon: ShieldCheck, color: 'text-rose-600', bgColor: 'bg-rose-100 dark:bg-rose-950/40', category: 'Sign', new: true },

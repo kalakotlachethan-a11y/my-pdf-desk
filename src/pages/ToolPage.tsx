@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import { Link, useParams, useNavigate } from 'react-router-dom';
 import {
   Upload, X, Download, CheckCircle, ArrowLeft, FileText, RefreshCw,
-  Loader2, Info, Shield, AlertCircle,
+  Loader2, Info, Shield, AlertCircle, PenLine,
 } from 'lucide-react';
 import { getToolBySlug, tools } from '../data/tools';
 import { downloadProcessedFile, processTool, type ProcessedResult } from '../lib/fileTools';
@@ -39,6 +39,13 @@ function getAcceptedTypes(toolId: string): string {
   return map[toolId] ?? '.pdf';
 }
 
+/** Extensions accepted for a tool, used to validate drops/picks before processing. */
+function getAllowedExtensions(toolId: string): string[] {
+  return getAcceptedTypes(toolId).split(',').map(ext => ext.trim().toLowerCase());
+}
+
+const SIGNATURE_TOOLS = ['esign-pdf', 'draw-signature', 'upload-signature', 'digital-signature'];
+
 function getDefaultOptions(slug: string): Record<string, string> {
   const map: Record<string, Record<string, string>> = {
     'compress-pdf': { compression: 'medium' },
@@ -65,6 +72,23 @@ function acceptedLabel(accept: string) {
   return accept.replace(/\./g, '').replace(/,/g, ', ').toUpperCase();
 }
 
+/** Map raw processing errors to user-friendly messages; full detail stays in the console. */
+function friendlyError(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  const name = err instanceof Error ? err.name : '';
+  if (name === 'PasswordException' || /password/i.test(raw)) {
+    return 'This PDF is password-protected. Enter the correct password (where the tool offers a password field) and try again.';
+  }
+  if (/No PDF header|parse|Invalid PDF|invalid structure|corrupt|central directory|zip file|end of data/i.test(raw)) {
+    return 'This file could not be read as a valid document. Please check the file — it may be corrupted or in a different format than its name suggests.';
+  }
+  if (/memory|allocation|Maximum call stack/i.test(raw)) {
+    return 'This file is too large for your browser to process in one go. Try a smaller file or fewer pages.';
+  }
+  if (raw.length > 0 && raw.length <= 140) return raw;
+  return 'Something went wrong while processing this file. Please try again with another file.';
+}
+
 export default function ToolPage() {
   const { slug = '' } = useParams();
   const navigate = useNavigate();
@@ -78,9 +102,14 @@ export default function ToolPage() {
   const [result, setResult] = useState<ProcessedResult | null>(null);
   const [error, setError] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [hasSignature, setHasSignature] = useState(false);
+  const drawingRef = useRef(false);
+  const lastPointRef = useRef<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
     setOptions(getDefaultOptions(slug));
+    setHasSignature(false);
     setFiles(prev => {
       prev.forEach(item => {
         if (item.preview) URL.revokeObjectURL(item.preview);
@@ -113,8 +142,17 @@ export default function ToolPage() {
     e.preventDefault();
     setIsDragging(false);
     const droppedFiles = Array.from(e.dataTransfer.files);
-    if (droppedFiles.length) handleFiles(droppedFiles);
-  }, [handleFiles]);
+    const allowed = getAllowedExtensions(slug);
+    const rejected = droppedFiles.filter(file => {
+      const ext = `.${file.name.split('.').pop()?.toLowerCase() ?? ''}`;
+      return !allowed.includes(ext) && !allowed.includes(file.type);
+    });
+    const accepted = droppedFiles.filter(file => !rejected.includes(file));
+    if (accepted.length) handleFiles(accepted);
+    if (rejected.length) {
+      setError(`Skipped ${rejected.length} unsupported file${rejected.length > 1 ? 's' : ''}: ${rejected.map(f => f.name).join(', ').slice(0, 80)}${rejected.map(f => f.name).join(', ').length > 80 ? '…' : ''} — this tool accepts ${acceptedLabel(getAcceptedTypes(slug))}.`);
+    }
+  }, [handleFiles, slug]);
 
   const onInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files?.length) handleFiles(Array.from(e.target.files));
@@ -137,13 +175,18 @@ export default function ToolPage() {
     setProgress(8);
     setError('');
 
+    const finalOptions = { ...options };
+    if (SIGNATURE_TOOLS.includes(slug) && canvasRef.current && hasSignature) {
+      finalOptions.signatureData = canvasRef.current.toDataURL('image/png');
+    }
+
     const progressTimer = window.setInterval(() => {
       setProgress(prev => Math.min(prev + 6, 92));
     }, 120);
 
     try {
       setState('processing');
-      const processed = await processTool(slug, files.map(item => item.file), options);
+      const processed = await processTool(slug, files.map(item => item.file), finalOptions);
       window.clearInterval(progressTimer);
       setProgress(100);
       setResult(processed);
@@ -151,7 +194,8 @@ export default function ToolPage() {
     } catch (err) {
       window.clearInterval(progressTimer);
       setProgress(0);
-      setError(err instanceof Error ? err.message : 'Unable to process this file.');
+      console.error('Tool processing failed:', err);
+      setError(friendlyError(err));
       setState('error');
     }
   };
@@ -166,6 +210,38 @@ export default function ToolPage() {
     setResult(null);
     setError('');
     setOptions(getDefaultOptions(slug));
+    setHasSignature(false);
+  };
+
+  const getCanvasPoint = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return { x: 0, y: 0 };
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: (e.clientX - rect.left) * (canvas.width / rect.width),
+      y: (e.clientY - rect.top) * (canvas.height / rect.height),
+    };
+  };
+
+  const drawStroke = (from: { x: number; y: number }, to: { x: number; y: number }) => {
+    const canvas = canvasRef.current;
+    const context = canvas?.getContext('2d');
+    if (!canvas || !context) return;
+    context.strokeStyle = '#0f172a';
+    context.lineWidth = 2.5;
+    context.lineCap = 'round';
+    context.lineJoin = 'round';
+    context.beginPath();
+    context.moveTo(from.x, from.y);
+    context.lineTo(to.x, to.y);
+    context.stroke();
+  };
+
+  const clearSignature = () => {
+    const canvas = canvasRef.current;
+    const context = canvas?.getContext('2d');
+    if (canvas && context) context.clearRect(0, 0, canvas.width, canvas.height);
+    setHasSignature(false);
   };
 
   if (!tool) {
@@ -186,7 +262,7 @@ export default function ToolPage() {
   const isCompressTool = slug === 'compress-pdf' || slug === 'image-compressor' || slug === 'batch-compress';
   const showPageInput = slug === 'delete-pages' || slug === 'extract-pages';
   const showTextInput = slug === 'add-text' || slug === 'pdf-editor';
-  const showSignatureInput = ['esign-pdf', 'draw-signature', 'upload-signature', 'digital-signature'].includes(slug);
+  const showSignatureInput = SIGNATURE_TOOLS.includes(slug);
   const showWatermarkInput = slug === 'watermark-pdf' || slug === 'protect-pdf' || slug === 'encrypt-pdf';
 
   return (
@@ -335,18 +411,29 @@ export default function ToolPage() {
             )}
 
             {slug === 'rotate-pdf' && (
-              <label className="block">
-                <span className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Rotation</span>
-                <select
-                  value={options.rotation ?? '90'}
-                  onChange={e => setOption('rotation', e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white"
-                >
-                  <option value="90">90 degrees clockwise</option>
-                  <option value="180">180 degrees</option>
-                  <option value="270">270 degrees clockwise</option>
-                </select>
-              </label>
+              <>
+                <label className="block">
+                  <span className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Rotation</span>
+                  <select
+                    value={options.rotation ?? '90'}
+                    onChange={e => setOption('rotation', e.target.value)}
+                    className="w-full px-3 py-2 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white"
+                  >
+                    <option value="90">90 degrees clockwise</option>
+                    <option value="180">180 degrees</option>
+                    <option value="270">270 degrees clockwise</option>
+                  </select>
+                </label>
+                <label className="block">
+                  <span className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Pages to rotate</span>
+                  <input
+                    value={options.pages ?? ''}
+                    onChange={e => setOption('pages', e.target.value)}
+                    placeholder="Leave blank to rotate all pages, or e.g. 1,3-5"
+                    className="w-full px-3 py-2 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white"
+                  />
+                </label>
+              </>
             )}
 
             {showPageInput && (
@@ -376,14 +463,112 @@ export default function ToolPage() {
               </label>
             )}
 
-            {(showTextInput || showSignatureInput || showWatermarkInput) && (
+            {slug === 'split-pdf' && (
+              <label className="block">
+                <span className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Split ranges</span>
+                <input
+                  value={options.ranges ?? ''}
+                  onChange={e => setOption('ranges', e.target.value)}
+                  placeholder="Leave blank for one file per page, or e.g. 1-3,5"
+                  className="w-full px-3 py-2 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white"
+                />
+                <p className="text-xs text-gray-400 mt-1">Each range or page becomes its own PDF. Example: 1-3,5 gives a 3-page PDF and a 1-page PDF.</p>
+              </label>
+            )}
+
+            {(showTextInput || showWatermarkInput) && (
               <label className="block">
                 <span className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">
-                  {showSignatureInput ? 'Signature text' : showWatermarkInput ? 'Watermark text' : 'Text to add'}
+                  {showWatermarkInput ? 'Watermark text' : 'Text to add'}
                 </span>
                 <input
-                  value={showSignatureInput ? options.signature ?? '' : showWatermarkInput ? options.watermarkText ?? '' : options.text ?? ''}
-                  onChange={e => setOption(showSignatureInput ? 'signature' : showWatermarkInput ? 'watermarkText' : 'text', e.target.value)}
+                  value={showWatermarkInput ? options.watermarkText ?? '' : options.text ?? ''}
+                  onChange={e => setOption(showWatermarkInput ? 'watermarkText' : 'text', e.target.value)}
+                  className="w-full px-3 py-2 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white"
+                />
+              </label>
+            )}
+
+            {showSignatureInput && (
+              <div className="space-y-4">
+                <div>
+                  <span className="flex items-center gap-1.5 text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">
+                    <PenLine size={14} /> Draw your signature
+                  </span>
+                  <canvas
+                    ref={canvasRef}
+                    width={480}
+                    height={140}
+                    aria-label="Signature drawing area"
+                    className="w-full touch-none bg-white dark:bg-gray-900 border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-xl cursor-crosshair"
+                    onPointerDown={e => {
+                      e.preventDefault();
+                      drawingRef.current = true;
+                      const point = getCanvasPoint(e);
+                      lastPointRef.current = point;
+                      drawStroke(point, point);
+                      setHasSignature(true);
+                    }}
+                    onPointerMove={e => {
+                      if (!drawingRef.current) return;
+                      const point = getCanvasPoint(e);
+                      if (lastPointRef.current) drawStroke(lastPointRef.current, point);
+                      lastPointRef.current = point;
+                    }}
+                    onPointerUp={() => { drawingRef.current = false; lastPointRef.current = null; }}
+                    onPointerLeave={() => { drawingRef.current = false; lastPointRef.current = null; }}
+                  />
+                  <div className="flex items-center justify-between mt-2">
+                    <p className="text-xs text-gray-400">Draw with mouse, pen, or touch{hasSignature ? ' — signature captured ✓' : ''}</p>
+                    <button type="button" onClick={clearSignature} className="text-xs text-blue-600 dark:text-blue-400 hover:underline">Clear</button>
+                  </div>
+                </div>
+                <label className="block">
+                  <span className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Or type a signature line (used if nothing is drawn)</span>
+                  <input
+                    value={options.signature ?? ''}
+                    onChange={e => setOption('signature', e.target.value)}
+                    className="w-full px-3 py-2 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white"
+                  />
+                </label>
+                <label className="block">
+                  <span className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Sign on page</span>
+                  <input
+                    type="number"
+                    min={1}
+                    value={options.signPage ?? ''}
+                    placeholder="Last page"
+                    onChange={e => setOption('signPage', e.target.value)}
+                    className="w-full px-3 py-2 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white"
+                  />
+                </label>
+              </div>
+            )}
+
+            {(slug === 'protect-pdf' || slug === 'encrypt-pdf') && (
+              <label className="block">
+                <span className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Password required to open the PDF</span>
+                <input
+                  type="password"
+                  value={options.password ?? ''}
+                  onChange={e => setOption('password', e.target.value)}
+                  placeholder="At least 4 characters"
+                  autoComplete="new-password"
+                  className="w-full px-3 py-2 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white"
+                />
+                <p className="text-xs text-gray-400 mt-1">AES-256 encryption, applied in your browser. The password cannot be recovered if lost.</p>
+              </label>
+            )}
+
+            {slug === 'unlock-pdf' && (
+              <label className="block">
+                <span className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">PDF password (if known)</span>
+                <input
+                  type="password"
+                  value={options.password ?? ''}
+                  onChange={e => setOption('password', e.target.value)}
+                  placeholder="Leave empty for restriction-only PDFs"
+                  autoComplete="off"
                   className="w-full px-3 py-2 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white"
                 />
               </label>
