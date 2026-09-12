@@ -33,7 +33,7 @@ export const tools: Tool[] = [
   { id: 'powerpoint-to-pdf', label: 'PowerPoint to PDF', description: 'Convert presentations to PDF format', icon: FileType, color: 'text-red-600', bgColor: 'bg-red-100 dark:bg-red-950/40', category: 'Convert' },
 
   // Editing
-  { id: 'pdf-editor', label: 'PDF Editor', description: 'Edit text, images, and content directly in your PDF', icon: AlignLeft, color: 'text-violet-600', bgColor: 'bg-violet-100 dark:bg-violet-950/40', category: 'Edit', popular: true },
+  { id: 'pdf-editor', label: 'PDF Editor', description: 'Edit text, add text, and modify your PDF directly in your browser', icon: AlignLeft, color: 'text-violet-600', bgColor: 'bg-violet-100 dark:bg-violet-950/40', category: 'Edit', popular: true },
   { id: 'add-text', label: 'Add Text to PDF', description: 'Insert text boxes, labels, and annotations', icon: Type, color: 'text-violet-600', bgColor: 'bg-violet-100 dark:bg-violet-950/40', category: 'Edit' },
   { id: 'add-images', label: 'Add Images to PDF', description: 'Insert images into any page of your PDF', icon: ImagePlus, color: 'text-violet-600', bgColor: 'bg-violet-100 dark:bg-violet-950/40', category: 'Edit' },
   { id: 'rearrange-pages', label: 'Rearrange Pages', description: 'Drag and drop to reorder PDF pages', icon: Layers, color: 'text-indigo-600', bgColor: 'bg-indigo-100 dark:bg-indigo-950/40', category: 'Edit' },

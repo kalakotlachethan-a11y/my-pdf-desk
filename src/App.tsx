@@ -4,6 +4,7 @@ import Navbar from './components/Navbar';
 import Footer from './components/Footer';
 import Home from './pages/Home';
 import ToolPage from './pages/ToolPage';
+import PdfEditorPage from './pages/PdfEditorPage';
 import Dashboard from './pages/Dashboard';
 import About from './pages/About';
 import Contact from './pages/Contact';
@@ -19,6 +20,7 @@ export default function App() {
           <main className="flex-1">
             <Routes>
               <Route path="/" element={<Home />} />
+              <Route path="/tools/pdf-editor" element={<PdfEditorPage />} />
               <Route path="/tools/:slug" element={<ToolPage />} />
               <Route path="/dashboard" element={<Dashboard />} />
               <Route path="/about" element={<About />} />
