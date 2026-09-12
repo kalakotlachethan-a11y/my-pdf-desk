@@ -514,6 +514,42 @@ async function protectPdf(file: File, options: Options) {
   return output(`${baseName(file.name)}-protected.pdf`, new Blob([bytesToBlobPart(bytes)], { type: pdfMime }), `Encrypted with AES-256. The PDF now requires the password to open — keep it safe, it cannot be recovered.`, [file]);
 }
 
+async function restrictPdf(file: File, options: Options) {
+  // Owner-password-only encryption: the PDF opens without any password, but the
+  // embedded permission flags tell compliant viewers what readers may do with it.
+  const allowed = (key: string, fallback = true) => (options[key] ?? (fallback ? 'allowed' : 'blocked')) === 'allowed';
+  const source = await PDFDocument.load(await file.arrayBuffer(), { ignoreEncryption: true });
+  const secure = await SecurePdfDocument.load(await source.save({ useObjectStreams: true }));
+  // Random internal owner password: only grants permission-bypass to whoever holds it.
+  const ownerBytes = new Uint8Array(24);
+  crypto.getRandomValues(ownerBytes);
+  const ownerPassword = Array.from(ownerBytes, b => b.toString(36).padStart(2, '0')).join('').slice(0, 32);
+  secure.encrypt({
+    ownerPassword,
+    algorithm: 'AES-256',
+    permissions: {
+      printing: allowed('printing') ? 'highResolution' : false,
+      copying: allowed('copying'),
+      modifying: allowed('editing'),
+      annotating: allowed('annotating'),
+      fillingForms: allowed('fillingForms'),
+      contentAccessibility: true,
+      documentAssembly: allowed('editing'),
+    },
+  });
+  const bytes = await secure.save({ useObjectStreams: true });
+  const blocked: string[] = [];
+  if (!allowed('printing')) blocked.push('printing');
+  if (!allowed('copying')) blocked.push('copying text');
+  if (!allowed('editing')) blocked.push('editing');
+  if (!allowed('annotating')) blocked.push('annotations');
+  if (!allowed('fillingForms')) blocked.push('form filling');
+  const message = blocked.length
+    ? `Applied restrictions: ${blocked.join(', ')} blocked. The PDF still opens without a password. Note: permission restrictions depend on the PDF viewer and may not be enforced by every application.`
+    : 'Encrypted with no restrictions selected — the PDF opens normally and all actions remain allowed. Note: permission restrictions depend on the PDF viewer.';
+  return output(`${baseName(file.name)}-restricted.pdf`, new Blob([bytesToBlobPart(bytes)], { type: pdfMime }), message, [file]);
+}
+
 async function unlockPdf(file: File, options: Options) {
   const password = options.password ?? '';
   let parseError: unknown = null;
@@ -649,8 +685,9 @@ export async function processTool(slug: string, files: File[], options: Options)
     case 'pdf-to-jpg':
       return pdfToImages(files[0], 'image/jpeg');
     case 'protect-pdf':
-    case 'encrypt-pdf':
       return protectPdf(files[0], options);
+    case 'encrypt-pdf':
+      return restrictPdf(files[0], options);
     case 'unlock-pdf':
       return unlockPdf(files[0], options);
     case 'pdf-to-png':

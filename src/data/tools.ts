@@ -49,7 +49,7 @@ export const tools: Tool[] = [
   // Security
   { id: 'protect-pdf', label: 'Protect PDF', description: 'Add a real open password with AES-256 encryption', icon: Shield, color: 'text-emerald-600', bgColor: 'bg-emerald-100 dark:bg-emerald-950/40', category: 'Security', popular: true },
   { id: 'unlock-pdf', label: 'Unlock PDF', description: 'Remove passwords and restrictions from your PDF', icon: Unlock, color: 'text-emerald-600', bgColor: 'bg-emerald-100 dark:bg-emerald-950/40', category: 'Security' },
-  { id: 'encrypt-pdf', label: 'Encrypt PDF', description: 'Apply AES-256 password encryption to your PDF', icon: Lock, color: 'text-teal-600', bgColor: 'bg-teal-100 dark:bg-teal-950/40', category: 'Security' },
+  { id: 'encrypt-pdf', label: 'Encrypt PDF', description: 'Restrict printing, copying, and editing — opens without a password', icon: Lock, color: 'text-teal-600', bgColor: 'bg-teal-100 dark:bg-teal-950/40', category: 'Security' },
   { id: 'watermark-pdf', label: 'Watermark PDF', description: 'Add text or image watermarks to your PDF', icon: Stamp, color: 'text-teal-600', bgColor: 'bg-teal-100 dark:bg-teal-950/40', category: 'Security' },
 
   // Organization

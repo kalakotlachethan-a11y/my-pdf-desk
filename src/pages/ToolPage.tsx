@@ -171,6 +171,11 @@ export default function ToolPage() {
   };
 
   const runProcessing = async () => {
+    if (slug === 'protect-pdf' && options.password && options.confirmPassword && options.password !== options.confirmPassword) {
+      setError('The passwords do not match. Please re-enter them.');
+      setState('error');
+      return;
+    }
     setState('uploading');
     setProgress(8);
     setError('');
@@ -263,7 +268,7 @@ export default function ToolPage() {
   const showPageInput = slug === 'delete-pages' || slug === 'extract-pages';
   const showTextInput = slug === 'add-text' || slug === 'pdf-editor';
   const showSignatureInput = SIGNATURE_TOOLS.includes(slug);
-  const showWatermarkInput = slug === 'watermark-pdf' || slug === 'protect-pdf' || slug === 'encrypt-pdf';
+  const showWatermarkInput = slug === 'watermark-pdf';
 
   return (
     <div className="min-h-screen bg-white dark:bg-gray-900 pt-16">
@@ -545,19 +550,68 @@ export default function ToolPage() {
               </div>
             )}
 
-            {(slug === 'protect-pdf' || slug === 'encrypt-pdf') && (
-              <label className="block">
-                <span className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Password required to open the PDF</span>
-                <input
-                  type="password"
-                  value={options.password ?? ''}
-                  onChange={e => setOption('password', e.target.value)}
-                  placeholder="At least 4 characters"
-                  autoComplete="new-password"
-                  className="w-full px-3 py-2 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white"
-                />
-                <p className="text-xs text-gray-400 mt-1">AES-256 encryption, applied in your browser. The password cannot be recovered if lost.</p>
-              </label>
+            {slug === 'protect-pdf' && (
+              <div className="space-y-4">
+                <label className="block">
+                  <span className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Password required to open the PDF</span>
+                  <input
+                    type="password"
+                    value={options.password ?? ''}
+                    onChange={e => setOption('password', e.target.value)}
+                    placeholder="At least 4 characters"
+                    autoComplete="new-password"
+                    className="w-full px-3 py-2 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white"
+                  />
+                </label>
+                <label className="block">
+                  <span className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Confirm password</span>
+                  <input
+                    type="password"
+                    value={options.confirmPassword ?? ''}
+                    onChange={e => setOption('confirmPassword', e.target.value)}
+                    placeholder="Re-enter the password"
+                    autoComplete="new-password"
+                    className="w-full px-3 py-2 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white"
+                  />
+                </label>
+                <p className="text-xs text-gray-400">AES-256 encryption, applied in your browser. The password cannot be recovered if lost.</p>
+              </div>
+            )}
+
+            {slug === 'encrypt-pdf' && (
+              <div className="space-y-2">
+                <span className="block text-sm font-medium text-gray-700 dark:text-gray-300">Allowed actions after opening</span>
+                {[
+                  ['printing', 'Printing'],
+                  ['copying', 'Copying text and content'],
+                  ['editing', 'Editing content'],
+                  ['annotating', 'Adding annotations'],
+                  ['fillingForms', 'Filling forms'],
+                ].map(([key, label]) => (
+                  <div key={key} className="flex items-center justify-between p-3 rounded-xl bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700">
+                    <span className="text-sm text-gray-700 dark:text-gray-300">{label}</span>
+                    <div className="flex rounded-lg overflow-hidden border border-gray-200 dark:border-gray-700">
+                      {['allowed', 'blocked'].map(value => (
+                        <button
+                          key={value}
+                          type="button"
+                          onClick={() => setOption(key, value)}
+                          className={`px-3 py-1.5 text-xs font-medium transition-colors ${
+                            (options[key] ?? 'allowed') === value
+                              ? value === 'allowed'
+                                ? 'bg-emerald-100 dark:bg-emerald-900/50 text-emerald-700 dark:text-emerald-300'
+                                : 'bg-red-100 dark:bg-red-900/50 text-red-700 dark:text-red-300'
+                              : 'bg-white dark:bg-gray-800 text-gray-500 hover:bg-gray-50 dark:hover:bg-gray-700'
+                          }`}
+                        >
+                          {value === 'allowed' ? 'Allowed' : 'Blocked'}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+                <p className="text-xs text-gray-400 pt-1">The PDF opens without any password. Permission restrictions depend on the PDF viewer and may not be enforced by every application.</p>
+              </div>
             )}
 
             {slug === 'unlock-pdf' && (
