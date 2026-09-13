@@ -2,10 +2,10 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import { Link, useParams, useNavigate } from 'react-router-dom';
 import {
   Upload, X, Download, CheckCircle, ArrowLeft, FileText, RefreshCw,
-  Loader2, Info, Shield, AlertCircle, PenLine,
+  Loader2, Info, Shield, AlertCircle, PenLine, Undo2, ShieldCheck,
 } from 'lucide-react';
 import { getToolBySlug, tools } from '../data/tools';
-import { downloadProcessedFile, processTool, type ProcessedResult } from '../lib/fileTools';
+import { downloadProcessedFile, processTool, OCR_LANGUAGE_OPTIONS, type ProcessedResult, type VerifyReport } from '../lib/fileTools';
 
 type ProcessingState = 'idle' | 'uploading' | 'processing' | 'done' | 'error';
 
@@ -45,6 +45,7 @@ function getAllowedExtensions(toolId: string): string[] {
 }
 
 const SIGNATURE_TOOLS = ['esign-pdf', 'draw-signature', 'upload-signature', 'digital-signature'];
+const SIGNATURE_ACCEPT = '.png,.jpg,.jpeg,.svg,image/png,image/jpeg,image/svg+xml';
 
 function getDefaultOptions(slug: string): Record<string, string> {
   const map: Record<string, Record<string, string>> = {
@@ -57,13 +58,15 @@ function getDefaultOptions(slug: string): Record<string, string> {
     'rearrange-pages': { pageOrder: '' },
     'add-text': { text: 'My PDF Desk' },
     'pdf-editor': { text: 'Edited with My PDF Desk' },
-    'watermark-pdf': { watermarkText: 'CONFIDENTIAL', opacity: '40' },
+    'watermark-pdf': { watermarkText: 'CONFIDENTIAL', opacity: '40', watermarkSize: '16', watermarkRotation: '-45', pages: '' },
     'protect-pdf': { watermarkText: 'Protected Copy', opacity: '15' },
     'encrypt-pdf': { watermarkText: 'Protected Copy', opacity: '15' },
     'esign-pdf': { signature: 'Signed with My PDF Desk' },
     'draw-signature': { signature: 'Signed with My PDF Desk' },
     'upload-signature': { signature: 'Signed with My PDF Desk' },
     'digital-signature': { signature: 'Signed with My PDF Desk' },
+    'page-numbering': { numberFormat: 'n-of-total', numberPosition: 'bottom-center', numberSize: 'medium' },
+    'ocr-pdf': { ocrLang: 'eng' },
   };
   return map[slug] ?? {};
 }
@@ -106,10 +109,21 @@ export default function ToolPage() {
   const [hasSignature, setHasSignature] = useState(false);
   const drawingRef = useRef(false);
   const lastPointRef = useRef<{ x: number; y: number } | null>(null);
+  const strokesRef = useRef<Array<{ color: string; width: number; points: Array<{ x: number; y: number }> }>>([]);
+  const [inkColor, setInkColor] = useState('#0f172a');
+  const [uploadedSignature, setUploadedSignature] = useState<string | null>(null);
+  const sigInputRef = useRef<HTMLInputElement>(null);
+  const pdfInputRef = useRef<HTMLInputElement>(null);
+  const watermarkInputRef = useRef<HTMLInputElement>(null);
+  const [verifyReport, setVerifyReport] = useState<VerifyReport | null>(null);
 
   useEffect(() => {
     setOptions(getDefaultOptions(slug));
     setHasSignature(false);
+    setUploadedSignature(null);
+    setVerifyReport(null);
+    setInkColor('#0f172a');
+    strokesRef.current = [];
     setFiles(prev => {
       prev.forEach(item => {
         if (item.preview) URL.revokeObjectURL(item.preview);
@@ -184,10 +198,16 @@ export default function ToolPage() {
     if (SIGNATURE_TOOLS.includes(slug) && canvasRef.current && hasSignature) {
       finalOptions.signatureData = canvasRef.current.toDataURL('image/png');
     }
+    if (SIGNATURE_TOOLS.includes(slug) && !finalOptions.signatureData && uploadedSignature) {
+      finalOptions.signatureData = uploadedSignature;
+    }
+    if (slug === 'watermark-pdf' && finalOptions.watermarkImage == null) {
+      delete finalOptions.watermarkImage;
+    }
 
     const progressTimer = window.setInterval(() => {
-      setProgress(prev => Math.min(prev + 6, 92));
-    }, 120);
+      setProgress(prev => Math.min(prev + 4, 92));
+    }, 200);
 
     try {
       setState('processing');
@@ -195,6 +215,7 @@ export default function ToolPage() {
       window.clearInterval(progressTimer);
       setProgress(100);
       setResult(processed);
+      setVerifyReport(processed.verifyReport ?? null);
       setState('done');
     } catch (err) {
       window.clearInterval(progressTimer);
@@ -228,11 +249,31 @@ export default function ToolPage() {
     };
   };
 
+  const redrawCanvas = useCallback(() => {
+    const canvas = canvasRef.current;
+    const context = canvas?.getContext('2d');
+    if (!canvas || !context) return;
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    for (const stroke of strokesRef.current) {
+      context.strokeStyle = stroke.color;
+      context.lineWidth = stroke.width;
+      context.lineCap = 'round';
+      context.lineJoin = 'round';
+      context.beginPath();
+      stroke.points.forEach((point, index) => {
+        if (index === 0) context.moveTo(point.x, point.y);
+        else context.lineTo(point.x, point.y);
+      });
+      context.stroke();
+    }
+    setHasSignature(strokesRef.current.length > 0);
+  }, []);
+
   const drawStroke = (from: { x: number; y: number }, to: { x: number; y: number }) => {
     const canvas = canvasRef.current;
     const context = canvas?.getContext('2d');
     if (!canvas || !context) return;
-    context.strokeStyle = '#0f172a';
+    context.strokeStyle = inkColor;
     context.lineWidth = 2.5;
     context.lineCap = 'round';
     context.lineJoin = 'round';
@@ -242,12 +283,58 @@ export default function ToolPage() {
     context.stroke();
   };
 
-  const clearSignature = () => {
-    const canvas = canvasRef.current;
-    const context = canvas?.getContext('2d');
-    if (canvas && context) context.clearRect(0, 0, canvas.width, canvas.height);
-    setHasSignature(false);
+  const undoStroke = () => {
+    strokesRef.current.pop();
+    redrawCanvas();
   };
+
+  const clearSignature = () => {
+    strokesRef.current = [];
+    redrawCanvas();
+  };
+
+  const handleSignatureImage = useCallback((imageFile: File) => {
+    const ok = /\.(png|jpe?g|svg)$/i.test(imageFile.name) || /^image\/(png|jpeg|svg\+xml)$/.test(imageFile.type);
+    if (!ok) {
+      setError('Unsupported signature file. Please choose a PNG, JPG or SVG image.');
+      return;
+    }
+    setError('');
+    const reader = new FileReader();
+    reader.onload = () => {
+      setUploadedSignature(reader.result as string);
+      setHasSignature(false);
+    };
+    reader.readAsDataURL(imageFile);
+  }, []);
+
+  const handleImportSignaturePdf = useCallback(async (pdfFile: File) => {
+    setError('');
+    try {
+      const pdfjsModule = await import('pdfjs-dist/legacy/build/pdf.mjs');
+      const task = pdfjsModule.getDocument({ data: new Uint8Array(await pdfFile.arrayBuffer()) });
+      const pdf = await task.promise;
+      const page = await pdf.getPage(1);
+      const viewport = page.getViewport({ scale: 2 });
+      const canvas = document.createElement('canvas');
+      const context = canvas.getContext('2d');
+      if (!context) throw new Error('Canvas is not available in this browser.');
+      canvas.width = Math.ceil(viewport.width);
+      canvas.height = Math.ceil(viewport.height);
+      context.fillStyle = '#ffffff';
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      await page.render({ canvasContext: context, viewport } as never).promise;
+      const dataUrl = canvas.toDataURL('image/png');
+      canvas.width = 0;
+      canvas.height = 0;
+      await task.destroy();
+      setUploadedSignature(dataUrl);
+      setHasSignature(false);
+    } catch (err) {
+      console.error('Signature import failed:', err);
+      setError('Could not read that PDF to import a signature image. Please check the file and try again.');
+    }
+  }, []);
 
   if (!tool) {
     return (
@@ -511,6 +598,7 @@ export default function ToolPage() {
                       drawingRef.current = true;
                       const point = getCanvasPoint(e);
                       lastPointRef.current = point;
+                      strokesRef.current.push({ color: inkColor, width: 2.5, points: [point] });
                       drawStroke(point, point);
                       setHasSignature(true);
                     }}
@@ -519,15 +607,67 @@ export default function ToolPage() {
                       const point = getCanvasPoint(e);
                       if (lastPointRef.current) drawStroke(lastPointRef.current, point);
                       lastPointRef.current = point;
+                      const stroke = strokesRef.current[strokesRef.current.length - 1];
+                      if (stroke) stroke.points.push(point);
                     }}
                     onPointerUp={() => { drawingRef.current = false; lastPointRef.current = null; }}
                     onPointerLeave={() => { drawingRef.current = false; lastPointRef.current = null; }}
                   />
                   <div className="flex items-center justify-between mt-2">
-                    <p className="text-xs text-gray-400">Draw with mouse, pen, or touch{hasSignature ? ' — signature captured ✓' : ''}</p>
-                    <button type="button" onClick={clearSignature} className="text-xs text-blue-600 dark:text-blue-400 hover:underline">Clear</button>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-gray-400">Ink:</span>
+                      {['#0f172a', '#1d4ed8', '#b91c1c'].map(color => (
+                        <button
+                          key={color}
+                          type="button"
+                          aria-label={`Ink color ${color}`}
+                          onClick={() => setInkColor(color)}
+                          className={`w-5 h-5 rounded-full border-2 ${inkColor === color ? 'border-gray-900 dark:border-white scale-110' : 'border-gray-300'}`}
+                          style={{ backgroundColor: color }}
+                        />
+                      ))}
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <button type="button" onClick={undoStroke} disabled={!hasSignature} className="text-xs text-blue-600 dark:text-blue-400 hover:underline disabled:opacity-40 inline-flex items-center gap-1"><Undo2 size={12} /> Undo</button>
+                      <button type="button" onClick={clearSignature} className="text-xs text-blue-600 dark:text-blue-400 hover:underline">Clear</button>
+                    </div>
                   </div>
                 </div>
+                <div className="p-4 rounded-xl bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 space-y-3">
+                  <div className="flex flex-wrap gap-2">
+                    <button type="button" onClick={() => sigInputRef.current?.click()} className="px-3 py-1.5 text-xs font-medium rounded-lg bg-blue-50 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300 hover:bg-blue-100">Upload image (PNG, JPG, SVG)</button>
+                    <button type="button" onClick={() => pdfInputRef.current?.click()} className="px-3 py-1.5 text-xs font-medium rounded-lg bg-blue-50 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300 hover:bg-blue-100">Import from PDF (first page)</button>
+                    {uploadedSignature && <button type="button" onClick={() => setUploadedSignature(null)} className="px-3 py-1.5 text-xs font-medium rounded-lg bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-200">Choose another</button>}
+                  </div>
+                  <input ref={sigInputRef} type="file" accept={SIGNATURE_ACCEPT} className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) handleSignatureImage(f); e.target.value = ''; }} />
+                  <input ref={pdfInputRef} type="file" accept=".pdf,application/pdf" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) void handleImportSignaturePdf(f); e.target.value = ''; }} />
+                  {uploadedSignature ? (
+                    <div className="flex items-center gap-3">
+                      <img src={uploadedSignature} alt="Signature preview" className="max-h-20 rounded-lg border border-gray-200 dark:border-gray-700 bg-white object-contain" />
+                      <p className="text-xs text-gray-400">Preview — transparent PNG keeps its transparency. The drawn canvas takes priority if both are used.</p>
+                    </div>
+                  ) : (
+                    <p className="text-xs text-gray-400">Or draw above / type below. Imported PDF pages become an image snapshot you can place anywhere.</p>
+                  )}
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  <label className="block">
+                    <span className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Page</span>
+                    <input type="number" min={1} value={options.signPage ?? ''} placeholder="1" onChange={e => setOption('signPage', e.target.value)} className="w-full px-3 py-2 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white" />
+                  </label>
+                  <label className="block">
+                    <span className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">X position (pt)</span>
+                    <input type="number" min={0} value={options.signatureX ?? ''} placeholder="42" onChange={e => setOption('signatureX', e.target.value)} className="w-full px-3 py-2 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white" />
+                  </label>
+                  <label className="block">
+                    <span className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Y position (pt from bottom)</span>
+                    <input type="number" min={0} value={options.signatureY ?? ''} placeholder="96" onChange={e => setOption('signatureY', e.target.value)} className="w-full px-3 py-2 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white" />
+                  </label>
+                </div>
+                <label className="block">
+                  <span className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Width (pt) — height keeps the aspect ratio</span>
+                  <input type="number" min={20} max={400} value={options.signatureWidth ?? ''} placeholder="120" onChange={e => setOption('signatureWidth', e.target.value)} className="w-full px-3 py-2 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white" />
+                </label>
                 <label className="block">
                   <span className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Or type a signature line (used if nothing is drawn)</span>
                   <input
@@ -536,17 +676,7 @@ export default function ToolPage() {
                     className="w-full px-3 py-2 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white"
                   />
                 </label>
-                <label className="block">
-                  <span className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Sign on page</span>
-                  <input
-                    type="number"
-                    min={1}
-                    value={options.signPage ?? ''}
-                    placeholder="Last page"
-                    onChange={e => setOption('signPage', e.target.value)}
-                    className="w-full px-3 py-2 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white"
-                  />
-                </label>
+
               </div>
             )}
 
@@ -629,6 +759,92 @@ export default function ToolPage() {
             )}
 
             {showWatermarkInput && (
+              <>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <label className="block">
+                    <span className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Size: {options.watermarkSize ?? '16'}% of page width</span>
+                    <input type="range" min="4" max="60" value={options.watermarkSize ?? '16'} onChange={e => setOption('watermarkSize', e.target.value)} className="w-full" />
+                  </label>
+                  <label className="block">
+                    <span className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Rotation: {options.watermarkRotation ?? '-45'}°</span>
+                    <input type="range" min="-90" max="90" step="15" value={options.watermarkRotation ?? '-45'} onChange={e => setOption('watermarkRotation', e.target.value)} className="w-full" />
+                  </label>
+                </div>
+                <div>
+                  <span className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Pages</span>
+                  <input value={options.pages ?? ''} onChange={e => setOption('pages', e.target.value)} placeholder="Leave blank for all pages, or e.g. 1,3-5" className="w-full px-3 py-2 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white" />
+                </div>
+                <div className="p-3 rounded-xl bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700">
+                  <p className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Image watermark (optional — replaces the text)</p>
+                  <input ref={watermarkInputRef} type="file" accept=".png,.jpg,.jpeg,image/png,image/jpeg" className="hidden" onChange={e => {
+                    const file = e.target.files?.[0];
+                    e.target.value = '';
+                    if (!file) return;
+                    const reader = new FileReader();
+                    reader.onload = () => setOption('watermarkImage', reader.result as string);
+                    reader.readAsDataURL(file);
+                  }} />
+                  {options.watermarkImage ? (
+                    <div className="flex items-center gap-3">
+                      <img src={options.watermarkImage} alt="Watermark preview" className="max-h-16 rounded border border-gray-200 dark:border-gray-700 bg-white object-contain" />
+                      <button type="button" onClick={() => setOption('watermarkImage', '')} className="text-xs text-red-600 hover:underline">Remove image</button>
+                    </div>
+                  ) : (
+                    <button type="button" onClick={() => watermarkInputRef.current?.click()} className="text-sm text-blue-600 dark:text-blue-400 hover:underline">Choose an image…</button>
+                  )}
+                </div>
+              </>
+            )}
+
+            {slug === 'page-numbering' && (
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <label className="block">
+                  <span className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Format</span>
+                  <select value={options.numberFormat ?? 'n-of-total'} onChange={e => setOption('numberFormat', e.target.value)} className="w-full px-3 py-2 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white">
+                    <option value="n-of-total">1 / 10</option>
+                    <option value="page-n">Page 1</option>
+                    <option value="n">1</option>
+                  </select>
+                </label>
+                <label className="block">
+                  <span className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Position</span>
+                  <select value={options.numberPosition ?? 'bottom-center'} onChange={e => setOption('numberPosition', e.target.value)} className="w-full px-3 py-2 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white">
+                    <option value="bottom-center">Bottom centre</option>
+                    <option value="bottom-right">Bottom right</option>
+                    <option value="bottom-left">Bottom left</option>
+                    <option value="top-center">Top centre</option>
+                    <option value="top-right">Top right</option>
+                    <option value="top-left">Top left</option>
+                  </select>
+                </label>
+                <label className="block">
+                  <span className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Size</span>
+                  <select value={options.numberSize ?? 'medium'} onChange={e => setOption('numberSize', e.target.value)} className="w-full px-3 py-2 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white">
+                    <option value="small">Small (~10 pt)</option>
+                    <option value="medium">Medium (~13 pt)</option>
+                    <option value="large">Large (~16 pt)</option>
+                  </select>
+                </label>
+              </div>
+            )}
+
+            {slug === 'ocr-pdf' && (
+              <label className="block">
+                <span className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Document language</span>
+                <select value={options.ocrLang ?? 'eng'} onChange={e => setOption('ocrLang', e.target.value)} className="w-full px-3 py-2 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white">
+                  {OCR_LANGUAGE_OPTIONS.map(({ code, label }) => <option key={code} value={code}>{label}</option>)}
+                </select>
+                <p className="text-xs text-gray-400 mt-1">OCR runs entirely in your browser. The first run downloads the language data once, then it is cached. Up to 30 pages are processed.</p>
+              </label>
+            )}
+
+            {slug === 'verify-signature' && (
+              <p className="text-sm text-gray-500 dark:text-gray-400">
+                The check inspects the PDF's real signature dictionaries (AcroForm, /FT /Sig, ByteRange). Drawn or image signatures are reported as electronic marks — they cannot be cryptographically verified.
+              </p>
+            )}
+
+            {showWatermarkInput && (
               <label className="block">
                 <span className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Opacity: {options.opacity ?? '40'}%</span>
                 <input
@@ -708,6 +924,46 @@ export default function ToolPage() {
                 <RefreshCw size={18} /> Process Another
               </button>
             </div>
+            {verifyReport && (
+              <div className="mt-5 p-4 rounded-xl bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 space-y-3 text-sm">
+                <div className="flex items-center gap-2">
+                  <ShieldCheck size={18} className={verifyReport.status === 'invalid' ? 'text-red-600' : 'text-blue-600'} />
+                  <span className="font-semibold text-gray-900 dark:text-white">Signature Status</span>
+                  <span className={`ml-auto px-2 py-0.5 rounded-full text-xs font-bold ${
+                    verifyReport.status === 'electronic-only' ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300'
+                      : verifyReport.status === 'invalid' ? 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300'
+                      : 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300'}`}
+                  >
+                    {verifyReport.status === 'electronic-only' ? 'Electronic mark only' : verifyReport.status === 'invalid' ? 'Invalid' : verifyReport.status === 'valid' ? 'Valid' : 'Cannot be determined'}
+                  </span>
+                </div>
+                {verifyReport.status === 'electronic-only' && (
+                  <p className="text-amber-700 dark:text-amber-300">Electronic signature mark detected — this is a visual/electronic signature. It is not a cryptographic digital signature, so certificate-based authenticity cannot be verified.</p>
+                )}
+                <dl className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {[
+                    ['Signer', verifyReport.signer],
+                    ['Certificate', verifyReport.certificate],
+                    ['Certificate expiry', verifyReport.certificateExpiry],
+                    ['Trust', verifyReport.trust],
+                    ['Document integrity', verifyReport.integrity],
+                    ['Timestamp', verifyReport.timestamp],
+                    ['Signature fields found', String(verifyReport.signatureCount)],
+                  ].map(([label, value]) => value != null && (
+                    <div key={label} className="flex justify-between gap-2 p-2 rounded-lg bg-gray-50 dark:bg-gray-900">
+                      <dt className="text-gray-400">{label}</dt>
+                      <dd className="text-gray-800 dark:text-gray-200 text-right">{value}</dd>
+                    </div>
+                  ))}
+                </dl>
+                <details className="text-xs text-gray-500 dark:text-gray-400">
+                  <summary className="cursor-pointer font-medium">Verification details</summary>
+                  <ul className="list-disc pl-5 mt-2 space-y-1">
+                    {verifyReport.details.map((detail, index) => <li key={index}>{detail}</li>)}
+                  </ul>
+                </details>
+              </div>
+            )}
           </div>
         )}
 
