@@ -874,25 +874,34 @@ async function ocrPdf(file: File, options: Options) {
 
 /** Detect column-aligned tables in text items via x-coordinate clustering. */
 /**
- * High-fidelity PDF → PPTX: each page renders at 2x and is placed full-bleed on its own
- * slide. Slide size mirrors the PDF page (max 56 in, PowerPoint's hard limit), so the
- * visual layout is preserved exactly. The result is visual, not text-editable — stated
- * honestly in the result message.
+ * High-fidelity PDF → PPTX: each page is rendered at high resolution and placed
+ * full-bleed on its own slide; the slide size mirrors the PDF page (capped at
+ * PowerPoint's 56-inch limit), so the complete page — logo, headers, faculty
+ * names, footers, margins and all — is preserved visually. Nothing is cropped
+ * or filtered. Pages whose aspect ratio differs from slide 1 are scaled to fit
+ * and centered, never stretched or clipped. Slides are images, so text is not
+ * directly editable — stated honestly in the result message.
  */
 async function pdfToPptx(file: File) {
   const loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(await file.arrayBuffer()) });
   const pdf = await loadingTask.promise;
+  if (!pdf.numPages) throw new Error('This PDF has no pages to convert.');
   const pptx = new PptxGenJS();
   try {
+    // Slide size from page 1 (capped at PowerPoint's hard 56-inch limit).
+    const firstViewport = (await pdf.getPage(1)).getViewport({ scale: 1 });
+    const widthIn = Math.min(56, firstViewport.width / 72);
+    const heightIn = Math.min(56, firstViewport.height / 72);
+    pptx.defineLayout({ name: 'PDFPAGE', width: widthIn, height: heightIn });
+    pptx.layout = 'PDFPAGE';
+
     for (let i = 1; i <= pdf.numPages; i += 1) {
       const page = await pdf.getPage(i);
-      const viewport = page.getViewport({ scale: 2 });
-      if (i === 1) {
-        const widthIn = Math.min(56, viewport.width / 72);
-        const heightIn = Math.min(56, viewport.height / 72);
-        pptx.defineLayout({ name: 'PDFPAGE', width: widthIn, height: heightIn });
-        pptx.layout = 'PDFPAGE';
-      }
+      // Render the complete page (never a bounding-box crop). Cap the raster at
+      // 4096px on the long edge so very large scans cannot exhaust memory.
+      const baseViewport = page.getViewport({ scale: 1 });
+      const renderScale = Math.min(4, 4096 / Math.max(baseViewport.width, baseViewport.height));
+      const viewport = page.getViewport({ scale: renderScale });
       const canvas = document.createElement('canvas');
       const context = canvas.getContext('2d');
       if (!context) throw new Error('Canvas is not available in this browser.');
@@ -906,7 +915,13 @@ async function pdfToPptx(file: File) {
       canvas.height = 0;
       page.cleanup();
       const slide = pptx.addSlide();
-      slide.addImage({ data: dataUrl, x: 0, y: 0, w: pptx.presLayout.width / 914400, h: pptx.presLayout.height / 914400 });
+      // pptxgenjs 4.x takes inches. Fit the whole page inside the slide
+      // (identical aspect => exact full-bleed) and center any mismatch.
+      const aspect = baseViewport.width / baseViewport.height;
+      const slideAspect = widthIn / heightIn;
+      const w = aspect >= slideAspect ? widthIn : heightIn * aspect;
+      const h = aspect >= slideAspect ? widthIn / aspect : heightIn;
+      slide.addImage({ data: dataUrl, x: (widthIn - w) / 2, y: (heightIn - h) / 2, w, h });
     }
   } finally {
     await loadingTask.destroy();
