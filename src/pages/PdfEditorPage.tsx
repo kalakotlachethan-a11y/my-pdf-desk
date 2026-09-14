@@ -399,13 +399,20 @@ export default function PdfEditorPage() {
       const context = canvas.getContext('2d');
       if (!context) return;
 
-      canvas.width = Math.ceil(nextViewport.width);
-      canvas.height = Math.ceil(nextViewport.height);
+      // Render at device resolution (capped) so text/images stay sharp on phones;
+      // CSS size stays in CSS pixels so layout and edit alignment are unchanged.
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      canvas.width = Math.ceil(nextViewport.width * dpr);
+      canvas.height = Math.ceil(nextViewport.height * dpr);
       canvas.style.width = `${Math.ceil(nextViewport.width)}px`;
       canvas.style.height = `${Math.ceil(nextViewport.height)}px`;
 
       context.clearRect(0, 0, canvas.width, canvas.height);
-      await page.render({ canvasContext: context, viewport: nextViewport } as never).promise;
+      await page.render({
+        canvasContext: context,
+        viewport: nextViewport,
+        transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : undefined,
+      } as never).promise;
       const content = await page.getTextContent();
       const spans = content.items
         .map((item, index) => transformTextItem(item, nextViewport, currentPage - 1, index))
@@ -481,6 +488,9 @@ export default function PdfEditorPage() {
     setZoom(Math.round(target * 100) / 100);
   }, [viewport, zoom]);
 
+  // Double-tap zoom: toggle between fit-width and 2x.
+  const lastTapRef = useRef({ time: 0, x: 0, y: 0 });
+
   // Pinch-to-zoom: two-pointer tracking on the scroll section. The section keeps
   // touch-action: pan (native one-finger scrolling); the browser does not claim
   // two-finger pinch there, so we receive both pointers and zoom ourselves.
@@ -512,6 +522,18 @@ export default function PdfEditorPage() {
     const pinch = pinchRef.current;
     pinch.pointers.delete(event.pointerId);
     if (pinch.pointers.size < 2) pinch.baseDist = 0;
+    // Double-tap zoom (touch only): fit-width <-> 2x.
+    if (event.pointerType === 'touch' && pinch.pointers.size === 0) {
+      const last = lastTapRef.current;
+      const now = Date.now();
+      if (now - last.time < 300 && Math.hypot(event.clientX - last.x, event.clientY - last.y) < 32) {
+        lastTapRef.current = { time: 0, x: 0, y: 0 };
+        if (zoom > 1.3) fitTo('width');
+        else setZoom(2);
+        return;
+      }
+      lastTapRef.current = { time: now, x: event.clientX, y: event.clientY };
+    }
   };
 
   const changeZoom = (direction: 1 | -1) => {
@@ -534,6 +556,15 @@ export default function PdfEditorPage() {
       : Math.min(availableWidth / pageWidthPt, availableHeight / pageHeightPt);
     setZoom(Math.min(3, Math.max(0.5, Math.round(target * 100) / 100)));
   };
+
+  // Re-fit when the phone rotates so the page is never cropped sideways.
+  const fitToRef = useRef(fitTo);
+  fitToRef.current = fitTo;
+  useEffect(() => {
+    const onOrient = () => window.setTimeout(() => fitToRef.current('width'), 350);
+    window.addEventListener('orientationchange', onOrient);
+    return () => window.removeEventListener('orientationchange', onOrient);
+  }, []);
 
   const startEditingSpan = useCallback((span: TextSpan) => {
     // Mobile sheet edits are discard-until-Done: switching targets reverts them.
