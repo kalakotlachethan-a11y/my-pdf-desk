@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
-  AlignCenter, AlignLeft, AlignRight, ArrowLeft, Bold, Check, Download,
+  AlignCenter, AlignLeft, AlignRight, ArrowLeft, Bold, Check, ChevronLeft, ChevronRight, Download,
   Expand, FileText, Italic, Loader2, Maximize2, Minus, MousePointer2,
   Plus, Redo2, Trash2, Type, Underline, Undo2, Upload, X,
 } from 'lucide-react';
@@ -62,6 +62,18 @@ const zoomLevels = [0.5, 0.75, 1, 1.25, 1.5, 2, 3];
 const fontChoices = ['Helvetica', 'Times New Roman', 'Courier New', 'Arial', 'Georgia', 'Verdana'];
 const maxFileSize = 60 * 1024 * 1024;
 const historyLimit = 60;
+
+function useMediaQuery(query: string) {
+  const [matches, setMatches] = useState(() => typeof window !== 'undefined' && window.matchMedia(query).matches);
+  useEffect(() => {
+    const mql = window.matchMedia(query);
+    const onChange = (event: MediaQueryListEvent) => setMatches(event.matches);
+    setMatches(mql.matches);
+    mql.addEventListener('change', onChange);
+    return () => mql.removeEventListener('change', onChange);
+  }, [query]);
+  return matches;
+}
 
 function bytesToBlobPart(bytes: Uint8Array) {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
@@ -273,6 +285,10 @@ export default function PdfEditorPage() {
   const [changes, setChanges] = useState<TextChange[]>([]);
   const [historyMeta, setHistoryMeta] = useState({ canUndo: false, canRedo: false });
   const [isExporting, setIsExporting] = useState(false);
+  const isDesktop = useMediaQuery('(min-width: 1024px)');
+  const [keyboardInset, setKeyboardInset] = useState(0);
+  const pinchRef = useRef({ pointers: new Map<number, { x: number; y: number }>(), baseZoom: 1, baseDist: 0 });
+  const didInitialFitRef = useRef(false);
 
   changesRef.current = changes;
 
@@ -285,6 +301,7 @@ export default function PdfEditorPage() {
   const hasText = textSpans.length > 0;
 
   const selectedEditable = selectedChange ?? (selectedSpan ? makeChangeFromSpan(selectedSpan) : null);
+  const showMobileSheet = !isDesktop && Boolean(inlineEditId);
 
   const commit = useCallback((next: TextChange[]) => {
     const history = historyRef.current;
@@ -352,6 +369,7 @@ export default function PdfEditorPage() {
       setHistoryMeta({ canUndo: false, canRedo: false });
       setMode('select');
       setZoom(1);
+      didInitialFitRef.current = false;
     } catch (err) {
       if ((err as { name?: string }).name === 'PasswordException') {
         setError('This PDF is password protected. Remove the password and try again.');
@@ -426,27 +444,100 @@ export default function PdfEditorPage() {
     return () => container.removeEventListener('wheel', handler);
   }, [pdfDoc]);
 
+  // Keep the on-screen keyboard from covering the mobile edit sheet.
+  useEffect(() => {
+    const visualViewport = window.visualViewport;
+    if (!visualViewport) return;
+    const updateInset = () => setKeyboardInset(Math.max(0, window.innerHeight - visualViewport.height - visualViewport.offsetTop));
+    updateInset();
+    visualViewport.addEventListener('resize', updateInset);
+    visualViewport.addEventListener('scroll', updateInset);
+    return () => {
+      visualViewport.removeEventListener('resize', updateInset);
+      visualViewport.removeEventListener('scroll', updateInset);
+    };
+  }, []);
+
+  // Mobile: bring the box being edited into view above the keyboard.
+  useEffect(() => {
+    if (!inlineEditId || isDesktop) return;
+    const id = inlineEditId;
+    const timer = window.setTimeout(() => {
+      const element = pageWrapRef.current?.querySelector(`[data-change-id="${id}"]`);
+      element?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }, 80);
+    return () => window.clearTimeout(timer);
+  }, [inlineEditId, isDesktop]);
+
+  // Phones: fit the page to the screen width on first render.
+  useEffect(() => {
+    if (!viewport || didInitialFitRef.current) return;
+    didInitialFitRef.current = true;
+    if (!window.matchMedia('(max-width: 1023px)').matches) return;
+    const container = scrollRef.current;
+    if (!container) return;
+    const pageWidthPt = viewport.width / zoom;
+    const target = Math.min(2, Math.max(0.5, (container.clientWidth - 24) / pageWidthPt));
+    setZoom(Math.round(target * 100) / 100);
+  }, [viewport, zoom]);
+
+  // Pinch-to-zoom: two-pointer tracking on the scroll section. The section keeps
+  // touch-action: pan (native one-finger scrolling); the browser does not claim
+  // two-finger pinch there, so we receive both pointers and zoom ourselves.
+  const pinchDistance = (a: { x: number; y: number }, b: { x: number; y: number }) => Math.hypot(a.x - b.x, a.y - b.y);
+
+  const handleSectionPointerDown = (event: React.PointerEvent) => {
+    pinchRef.current.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (pinchRef.current.pointers.size === 2) {
+      const [a, b] = [...pinchRef.current.pointers.values()];
+      pinchRef.current.baseDist = pinchDistance(a, b);
+      pinchRef.current.baseZoom = zoom;
+    }
+  };
+
+  const handleSectionPointerMove = (event: React.PointerEvent) => {
+    const pinch = pinchRef.current;
+    const position = pinch.pointers.get(event.pointerId);
+    if (!position) return;
+    position.x = event.clientX;
+    position.y = event.clientY;
+    if (pinch.pointers.size === 2 && pinch.baseDist > 0) {
+      const [a, b] = [...pinch.pointers.values()];
+      const next = Math.min(3, Math.max(0.5, pinch.baseZoom * (pinchDistance(a, b) / pinch.baseDist)));
+      setZoom(Math.round(next * 100) / 100);
+    }
+  };
+
+  const handleSectionPointerUp = (event: React.PointerEvent) => {
+    const pinch = pinchRef.current;
+    pinch.pointers.delete(event.pointerId);
+    if (pinch.pointers.size < 2) pinch.baseDist = 0;
+  };
+
   const changeZoom = (direction: 1 | -1) => {
-    const index = zoomLevels.indexOf(zoom);
-    const nextIndex = Math.max(0, Math.min(zoomLevels.length - 1, index + direction));
-    setZoom(zoomLevels[nextIndex]);
+    const candidates = direction === 1
+      ? zoomLevels.filter(level => level > zoom + 0.001)
+      : [...zoomLevels].reverse().filter(level => level < zoom - 0.001);
+    setZoom(candidates[0] ?? (direction === 1 ? zoomLevels[zoomLevels.length - 1] : zoomLevels[0]));
   };
 
   const fitTo = (fitMode: 'width' | 'page') => {
     if (!viewport || !scrollRef.current) return;
     const container = scrollRef.current;
-    const availableWidth = Math.max(280, container.clientWidth - 64);
-    const availableHeight = Math.max(380, container.clientHeight - 64);
+    const margin = window.matchMedia('(max-width: 1023px)').matches ? 24 : 64;
+    const availableWidth = Math.max(280, container.clientWidth - margin);
+    const availableHeight = Math.max(380, container.clientHeight - margin);
     const pageWidthPt = viewport.width / zoom;
     const pageHeightPt = viewport.height / zoom;
     const target = fitMode === 'width'
       ? availableWidth / pageWidthPt
       : Math.min(availableWidth / pageWidthPt, availableHeight / pageHeightPt);
-    const closest = zoomLevels.reduce((best, level) => Math.abs(level - target) < Math.abs(best - target) ? level : best, zoomLevels[0]);
-    setZoom(closest);
+    setZoom(Math.min(3, Math.max(0.5, Math.round(target * 100) / 100)));
   };
 
   const startEditingSpan = useCallback((span: TextSpan) => {
+    // Mobile sheet edits are discard-until-Done: switching targets reverts them.
+    if (inlineEditId && !isDesktop) setChanges(historyRef.current.stack[historyRef.current.index]);
     const existing = changesRef.current.find(change => change.sourceId === span.id);
     inlineEditDraftRef.current = null;
     if (existing) {
@@ -458,7 +549,7 @@ export default function PdfEditorPage() {
     commit([...changesRef.current, change]);
     setSelection({ type: 'existing', id: span.id });
     setInlineEditId(change.id);
-  }, [commit]);
+  }, [commit, inlineEditId, isDesktop]);
 
   const addTextAt = (event: React.MouseEvent<HTMLDivElement>) => {
     if (!viewport) return;
@@ -473,6 +564,7 @@ export default function PdfEditorPage() {
         }
         inlineEditDraftRef.current = null;
       }
+      if (!isDesktop) setChanges(historyRef.current.stack[historyRef.current.index]);
       setSelection(null);
       setInlineEditId(null);
       return;
@@ -672,6 +764,22 @@ export default function PdfEditorPage() {
   const downloadRef = useRef(downloadEditedPdf);
   downloadRef.current = downloadEditedPdf;
 
+  // Mobile sheet: discard edits made in the bottom sheet unless Done is pressed.
+  const revertUncommittedEdits = useCallback(() => {
+    setChanges(historyRef.current.stack[historyRef.current.index]);
+  }, []);
+
+  const cancelMobileSheet = useCallback(() => {
+    revertUncommittedEdits();
+    setInlineEditId(null);
+  }, [revertUncommittedEdits]);
+
+  const doneMobileSheet = useCallback(() => {
+    const committed = historyRef.current.stack[historyRef.current.index];
+    if (changesRef.current !== committed) commit(changesRef.current);
+    setInlineEditId(null);
+  }, [commit]);
+
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
@@ -694,6 +802,7 @@ export default function PdfEditorPage() {
         deleteSelected();
       } else if (event.key === 'Escape') {
         if (inlineEditId) {
+          if (!isDesktop) revertUncommittedEdits();
           setInlineEditId(null);
         } else {
           setSelection(null);
@@ -704,7 +813,7 @@ export default function PdfEditorPage() {
 
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [deleteSelected, inlineEditId, redo, undo]);
+  }, [deleteSelected, inlineEditId, isDesktop, redo, revertUncommittedEdits, undo]);
 
   const handleDrop = (event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -729,7 +838,7 @@ export default function PdfEditorPage() {
   );
 
   const toolButton = (active: boolean) =>
-    `p-2 rounded-lg border transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+    `flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border p-0 transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 lg:h-10 lg:w-10 ${
       active ? 'bg-blue-100 text-blue-700 border-blue-300 dark:bg-blue-900/60 dark:text-blue-200' : 'border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800'
     }`;
 
@@ -823,7 +932,7 @@ export default function PdfEditorPage() {
                 setMode('select');
                 startEditingSpan(span);
               }}
-              className={`absolute text-left border transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+              className={`absolute before:absolute before:-inset-2 before:content-[''] text-left border transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 ${
                 selected ? 'bg-blue-500/20 border-blue-500' : 'border-transparent hover:bg-blue-400/10 hover:border-blue-300'
               }`}
               style={{
@@ -866,6 +975,7 @@ export default function PdfEditorPage() {
           return (
             <div
               key={change.id}
+              data-change-id={change.id}
               role="button"
               tabIndex={0}
               aria-label={`Editable text: ${change.text || 'empty text box'}`}
@@ -891,9 +1001,10 @@ export default function PdfEditorPage() {
                 minHeight: screen.height,
                 backgroundColor: '#ffffff',
                 padding: '1px 2px',
+                touchAction: 'none',
               }}
             >
-              {editing ? (
+              {editing && isDesktop ? (
                 <div
                   contentEditable
                   suppressContentEditableWarning
@@ -1031,9 +1142,9 @@ export default function PdfEditorPage() {
         </div>
       ) : (
         <div className="h-[calc(100vh-4rem)] flex flex-col">
-          <div className="bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-800 px-3 lg:px-5 py-2.5 flex flex-wrap items-center gap-2">
-            <Link to="/" className="font-bold gradient-text mr-1">My PDF Desk</Link>
-            <button type="button" onClick={() => fileInputRef.current?.click()} className="btn-secondary text-xs py-2 px-3" title="Open a different PDF">
+          <div className="bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-800 px-3 lg:px-5 py-2.5 flex flex-nowrap lg:flex-wrap items-center gap-2 overflow-x-auto lg:overflow-x-visible">
+            <Link to="/" className="font-bold gradient-text mr-1 shrink-0">My PDF Desk</Link>
+            <button type="button" onClick={() => fileInputRef.current?.click()} className="btn-secondary text-xs py-2 px-3 shrink-0" title="Open a different PDF">
               <Upload size={15} /> Open PDF
             </button>
             {fileInput}
@@ -1052,11 +1163,11 @@ export default function PdfEditorPage() {
             <button type="button" onClick={deleteSelected} disabled={!selection} className={`${toolButton(false)} disabled:opacity-40`} title="Delete selected text" aria-label="Delete selected object">
               <Trash2 size={17} />
             </button>
-            <span className="mx-1 h-6 w-px bg-gray-200 dark:bg-gray-700" aria-hidden="true" />
+            <span className="mx-1 h-6 w-px shrink-0 bg-gray-200 dark:bg-gray-700" aria-hidden="true" />
             <button type="button" onClick={() => changeZoom(-1)} className={toolButton(false)} title="Zoom out" aria-label="Zoom out">
               <Minus size={17} />
             </button>
-            <span className="text-sm text-gray-600 dark:text-gray-300 min-w-12 text-center" aria-live="polite">{Math.round(zoom * 100)}%</span>
+            <span className="text-sm text-gray-600 dark:text-gray-300 min-w-12 shrink-0 text-center" aria-live="polite">{Math.round(zoom * 100)}%</span>
             <button type="button" onClick={() => changeZoom(1)} className={toolButton(false)} title="Zoom in" aria-label="Zoom in">
               <Plus size={17} />
             </button>
@@ -1066,7 +1177,7 @@ export default function PdfEditorPage() {
             <button type="button" onClick={() => fitTo('page')} className={toolButton(false)} title="Fit to page" aria-label="Fit to page">
               <Expand size={17} />
             </button>
-            <button type="button" onClick={() => void downloadEditedPdf()} disabled={isExporting} className="btn-primary text-xs py-2 px-3 ml-auto disabled:opacity-60" title="Download PDF (Ctrl + S)">
+            <button type="button" onClick={() => void downloadEditedPdf()} disabled={isExporting} className="btn-primary text-xs py-2 px-3 ml-auto shrink-0 disabled:opacity-60" title="Download PDF (Ctrl + S)">
               {isExporting ? <Loader2 size={16} className="animate-spin" /> : <Download size={16} />} Download PDF
             </button>
           </div>
@@ -1086,7 +1197,14 @@ export default function PdfEditorPage() {
               </div>
             </aside>
 
-            <section ref={scrollRef} className="overflow-auto bg-gray-100 dark:bg-gray-950">
+            <section
+              ref={scrollRef}
+              className="overflow-auto overscroll-contain bg-gray-100 dark:bg-gray-950 pb-16 lg:pb-0"
+              onPointerDown={handleSectionPointerDown}
+              onPointerMove={handleSectionPointerMove}
+              onPointerUp={handleSectionPointerUp}
+              onPointerCancel={handleSectionPointerUp}
+            >
               <div className="sticky top-0 z-10 bg-gray-100/95 dark:bg-gray-950/95 border-b border-gray-200 dark:border-gray-800 px-4 py-2 flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
                   <button type="button" disabled={currentPage <= 1} onClick={() => setCurrentPage(p => Math.max(1, p - 1))} className="btn-secondary text-xs py-1.5 px-3 disabled:opacity-40">Previous</button>
@@ -1106,7 +1224,7 @@ export default function PdfEditorPage() {
                 </label>
               </div>
 
-              <div className="p-4 lg:p-8 flex justify-center">
+              <div className="p-4 pb-6 lg:p-8 flex justify-center">
                 <div
                   ref={pageWrapRef}
                   onClick={addTextAt}
@@ -1191,6 +1309,46 @@ export default function PdfEditorPage() {
               </div>
             </aside>
           </div>
+
+          {/* Mobile: fixed page navigation that never covers the PDF */}
+          <nav className="lg:hidden fixed bottom-0 inset-x-0 z-30 flex items-center justify-center gap-4 border-t border-gray-200 dark:border-gray-800 bg-white/95 dark:bg-gray-900/95 px-4 py-1.5 backdrop-blur" aria-label="Page navigation">
+            <button type="button" disabled={currentPage <= 1} onClick={() => setCurrentPage(p => Math.max(1, p - 1))} aria-label="Previous page" className="flex h-10 min-w-[44px] items-center justify-center rounded-lg border border-gray-200 text-gray-600 dark:border-gray-700 dark:text-gray-300 disabled:opacity-40">
+              <ChevronLeft size={20} />
+            </button>
+            <span className="text-sm font-semibold tabular-nums text-gray-700 dark:text-gray-300" aria-live="polite">{currentPage} / {pageCount}</span>
+            <button type="button" disabled={currentPage >= pageCount} onClick={() => setCurrentPage(p => Math.min(pageCount, p + 1))} aria-label="Next page" className="flex h-10 min-w-[44px] items-center justify-center rounded-lg border border-gray-200 text-gray-600 dark:border-gray-700 dark:text-gray-300 disabled:opacity-40">
+              <ChevronRight size={20} />
+            </button>
+          </nav>
+
+          {/* Mobile: bottom sheet for comfortable text editing above the keyboard */}
+          {showMobileSheet && selectedEditable && (
+            <div
+              className="lg:hidden fixed inset-x-2 z-40 rounded-2xl border border-gray-200 bg-white p-3 shadow-2xl dark:border-gray-700 dark:bg-gray-900"
+              style={{ bottom: `calc(3.25rem + ${keyboardInset}px)` }}
+              onPointerDown={event => event.stopPropagation()}
+            >
+              <div className="mb-2 flex items-center justify-between">
+                <span className="text-sm font-semibold text-gray-800 dark:text-gray-100">Edit text</span>
+                <div className="flex gap-2">
+                  <button type="button" onClick={cancelMobileSheet} className="btn-secondary text-xs py-2 px-3">Cancel</button>
+                  <button type="button" onClick={doneMobileSheet} className="btn-primary text-xs py-2 px-4">Done</button>
+                </div>
+              </div>
+              <textarea
+                autoFocus
+                rows={3}
+                value={selectedEditable.text}
+                onChange={event => {
+                  const value = event.target.value;
+                  setChanges(prev => prev.some(item => item.id === selectedEditable.id)
+                    ? prev.map(item => item.id === selectedEditable.id ? { ...item, text: value } : item)
+                    : [...prev, { ...selectedEditable, text: value }]);
+                }}
+                className="w-full min-h-[96px] rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-base text-gray-900 dark:border-gray-700 dark:bg-gray-950 dark:text-white"
+              />
+            </div>
+          )}
         </div>
       )}
     </div>

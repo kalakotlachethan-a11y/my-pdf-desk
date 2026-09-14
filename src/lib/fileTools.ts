@@ -5,6 +5,7 @@ import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
 import * as XLSX from 'xlsx';
 import mammoth from 'mammoth/mammoth.browser';
 import { createWorker as createOcrWorker } from 'tesseract.js';
+import PptxGenJS from 'pptxgenjs';
 import pdfWorkerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
@@ -434,43 +435,6 @@ async function htmlToPdf(html: string, title: string, sourceFiles: File[]) {
 
 function safeFileStem(text: string) {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 48) || 'processed-file';
-}
-
-/** Extract text with paragraph breaks inferred from baseline gaps (heading/keyword callers rely on it). */
-async function extractPdfText(file: File) {
-  const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise;
-  const pages: string[] = [];
-  for (let i = 1; i <= pdf.numPages; i += 1) {
-    const page = await pdf.getPage(i);
-    const content = await page.getTextContent();
-    const items = content.items.filter(item => 'str' in item && item.str.trim());
-    if (!items.length) {
-      pages.push(`Page ${i}\n`);
-      continue;
-    }
-    const paragraphs: string[] = [];
-    let current = '';
-    let lastY: number | null = null;
-    let lastHeight = 10;
-    for (const item of items) {
-      if (!('str' in item)) continue;
-      const transform = item.transform as number[];
-      const y = Math.round(transform[5] ?? 0);
-      lastHeight = Math.abs(transform[3] ?? 10);
-      const gap = lastY === null ? 0 : Math.abs(lastY - y);
-      if (lastY !== null && gap > lastHeight * 1.9) {
-        if (current.trim()) paragraphs.push(current.trim());
-        current = item.str;
-      } else {
-        const needsSpace = current.length > 0 && !/\s$/.test(current) && !/^\s/.test(item.str);
-        current += (needsSpace ? ' ' : '') + item.str;
-      }
-      lastY = y;
-    }
-    if (current.trim()) paragraphs.push(current.trim());
-    pages.push(`Page ${i}\n${paragraphs.join('\n\n')}`);
-  }
-  return pages.join('\n\n');
 }
 
 async function zipFiles(name: string, entries: ProcessedFile[], originalFiles: File[], message: string) {
@@ -1238,6 +1202,273 @@ async function pdfToExcel(file: File) {
   return blocksToXlsx(tables, `${baseName(file.name)}.xlsx`, [file], `Extracted ${tables.length} table${tables.length === 1 ? '' : 's'} (${rowCount} rows) into a genuine Excel workbook with real cells.`);
 }
 
+/**
+ * High-fidelity PDF → PPTX: each page renders at 2x and is placed full-bleed on its own
+ * slide. Slide size mirrors the PDF page (max 56 in, PowerPoint's hard limit), so the
+ * visual layout is preserved exactly. The result is visual, not text-editable — stated
+ * honestly in the result message.
+ */
+async function pdfToPptx(file: File) {
+  const loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(await file.arrayBuffer()) });
+  const pdf = await loadingTask.promise;
+  const pptx = new PptxGenJS();
+  try {
+    for (let i = 1; i <= pdf.numPages; i += 1) {
+      const page = await pdf.getPage(i);
+      const viewport = page.getViewport({ scale: 2 });
+      if (i === 1) {
+        const widthIn = Math.min(56, viewport.width / 72);
+        const heightIn = Math.min(56, viewport.height / 72);
+        pptx.defineLayout({ name: 'PDFPAGE', width: widthIn, height: heightIn });
+        pptx.layout = 'PDFPAGE';
+      }
+      const canvas = document.createElement('canvas');
+      const context = canvas.getContext('2d');
+      if (!context) throw new Error('Canvas is not available in this browser.');
+      canvas.width = Math.ceil(viewport.width);
+      canvas.height = Math.ceil(viewport.height);
+      context.fillStyle = '#ffffff';
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      await page.render({ canvasContext: context, viewport } as never).promise;
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
+      canvas.width = 0;
+      canvas.height = 0;
+      page.cleanup();
+      const slide = pptx.addSlide();
+      slide.addImage({ data: dataUrl, x: 0, y: 0, w: pptx.presLayout.width / 914400, h: pptx.presLayout.height / 914400 });
+    }
+  } finally {
+    await loadingTask.destroy();
+  }
+  const blob = (await pptx.write({ outputType: 'blob' })) as Blob;
+  if (!blob || blob.size < 500) throw new Error('PPTX generation failed. Please try again.');
+  return output(`${baseName(file.name)}.pptx`, new Blob([blob], { type: pptxMime }), `Created a ${pdf.numPages}-slide PowerPoint with each PDF page rendered at high quality on its own slide. The slides preserve the exact visual layout but are images, so text is not directly editable inside PowerPoint.`, [file]);
+}
+
+function sanitizeForPdf(text: string) {
+  return pdfSafeText(text);
+}
+
+/** Wrap a single logical line into physical lines that fit maxWidth (PDF points). */
+function wrapLine(font: PDFFont, line: string, size: number, maxWidth: number): string[] {
+  if (font.widthOfTextAtSize(line, size) <= maxWidth || maxWidth <= 0) return [line];
+  const words = line.split(' ');
+  const lines: string[] = [];
+  let current = '';
+  for (const word of words) {
+    const candidate = current ? `${current} ${word}` : word;
+    if (font.widthOfTextAtSize(candidate, size) > maxWidth && current) {
+      lines.push(current);
+      current = word;
+    } else {
+      current = candidate;
+    }
+  }
+  if (current) lines.push(current);
+  return lines.length ? lines : [line];
+}
+
+const EMU_PER_PT = 914400 / 72;
+
+function parseHexColor(value: string | undefined, fallback: { r: number; g: number; b: number }) {
+  const clean = (value ?? '').replace('#', '').trim();
+  if (!/^[0-9a-fA-F]{6}$/.test(clean)) return fallback;
+  return {
+    r: Number.parseInt(clean.slice(0, 2), 16) / 255,
+    g: Number.parseInt(clean.slice(2, 4), 16) / 255,
+    b: Number.parseInt(clean.slice(4, 6), 16) / 255,
+  };
+}
+
+function matchBlock(xml: string, tag: string) {
+  const results: string[] = [];
+  const pattern = new RegExp(`<${tag}\\b[\\s\\S]*?</${tag}>`, 'g');
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(xml)) !== null) results.push(match[0]);
+  return results;
+}
+
+function decodeXmlEntities(value: string) {
+  return value
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
+    .replace(/&amp;/g, '&');
+}
+
+/** Render PPTX slides to PDF with positioned text, images, tables and slide backgrounds. */
+async function pptxToPdf(file: File) {
+  if (/\.ppt$/i.test(file.name)) {
+    throw new Error('Legacy .ppt files are not supported in the browser. Please save the presentation as .pptx and try again.');
+  }
+  const zip = await JSZip.loadAsync(await file.arrayBuffer());
+  const presXml = await zip.file('ppt/presentation.xml')?.async('string');
+  if (!presXml) throw new Error('This file is not a valid PPTX presentation.');
+
+  const sizeMatch = /<p:sldSz[^>]*cx="(\d+)"[^>]*cy="(\d+)"/.exec(presXml)
+    ?? /<p:sldSz[^>]*cy="(\d+)"[^>]*cx="(\d+)"/.exec(presXml);
+  let widthPt = 720;
+  let heightPt = 405;
+  if (sizeMatch) {
+    const first = Number.parseInt(sizeMatch[1], 10) / EMU_PER_PT;
+    const second = Number.parseInt(sizeMatch[2], 10) / EMU_PER_PT;
+    widthPt = Math.round(Math.max(first, second));
+    heightPt = Math.round(Math.min(first, second));
+    if (/<p:sldSz[^>]*cy="(\d+)"[^>]*cx="(\d+)"/.test(presXml)) {
+      widthPt = Math.round(Math.max(first, second));
+      heightPt = Math.round(Math.min(first, second));
+    }
+  }
+
+  const slideFiles = Object.keys(zip.files)
+    .filter(name => /^ppt\/slides\/slide\d+\.xml$/.test(name))
+    .sort((a, b) => Number(a.match(/slide(\d+)/)?.[1] ?? 0) - Number(b.match(/slide(\d+)/)?.[1] ?? 0));
+  if (!slideFiles.length) throw new Error('This presentation contains no slides.');
+
+  const doc = await PDFDocument.create();
+  const fonts: FontSet = {
+    regular: await doc.embedFont(StandardFonts.Helvetica),
+    bold: await doc.embedFont(StandardFonts.HelveticaBold),
+    italic: await doc.embedFont(StandardFonts.HelveticaOblique),
+    boldItalic: await doc.embedFont(StandardFonts.HelveticaBoldOblique),
+  };
+  const defaultColor = { r: 0.13, g: 0.15, b: 0.2 };
+
+  for (const slidePath of slideFiles) {
+    const xml = (await zip.file(slidePath)?.async('string')) ?? '';
+    const relsRaw = await zip.file(slidePath.replace('slides/', 'slides/_rels/') + '.rels')?.async('string');
+    const rels = new Map<string, string>();
+    for (const rel of relsRaw?.match(/<Relationship\b[^>]*>/g) ?? []) {
+      const id = /Id="([^"]+)"/.exec(rel)?.[1];
+      const target = /Target="([^"]+)"/.exec(rel)?.[1];
+      if (id && target) rels.set(id, target.replace(/^\.\.\//, 'ppt/'));
+    }
+
+    const page = doc.addPage([widthPt, heightPt]);
+
+    const bg = /<p:bg>[\s\S]*?<a:srgbClr val="([0-9A-Fa-f]{6})"/.exec(xml)?.[1];
+    if (bg) {
+      const color = parseHexColor(bg, defaultColor);
+      page.drawRectangle({ x: 0, y: 0, width: widthPt, height: heightPt, color: rgb(color.r, color.g, color.b) });
+    }
+
+    // Text boxes: positioned paragraphs with size, bold/italic, color and alignment.
+    for (const shape of matchBlock(xml, 'p:sp')) {
+      const off = /<a:off x="(\d+)" y="(\d+)"/.exec(shape);
+      const ext = /<a:ext cx="(\d+)" cy="(\d+)"/.exec(shape);
+      if (!off || !ext) continue;
+      const boxX = Number.parseInt(off[1], 10) / EMU_PER_PT;
+      const boxY = Number.parseInt(off[2], 10) / EMU_PER_PT;
+      const boxW = Math.max(24, Number.parseInt(ext[1], 10) / EMU_PER_PT);
+      const boxH = Number.parseInt(ext[2], 10) / EMU_PER_PT;
+      const bodyPr = /<a:bodyPr[^>]*anchor="(\w+)"/.exec(shape)?.[1] ?? 't';
+
+      const paragraphs = matchBlock(shape, 'a:p');
+      const lineSpecs: Array<{ text: string; size: number; bold: boolean; italic: boolean; color: { r: number; g: number; b: number }; align: string; spacing: number }> = [];
+      for (const paragraph of paragraphs) {
+        const runs = [...paragraph.matchAll(/<a:r>([\s\S]*?)<\/a:r>/g)].map(runXml => {
+          const body = runXml[1];
+          const text = decodeXmlEntities(/<a:t>([\s\S]*?)<\/a:t>/.exec(body)?.[1] ?? '');
+          const sizeAttr = /sz="(\d+)"/.exec(body)?.[1];
+          const color = parseHexColor(/<a:solidFill><a:srgbClr val="([0-9A-Fa-f]{6})"/.exec(body)?.[1], defaultColor);
+          return {
+            text,
+            size: sizeAttr ? Math.max(6, Number.parseInt(sizeAttr, 10) / 100) : 18,
+            bold: /b="1"/.test(body),
+            italic: /i="1"/.test(body),
+            color,
+          };
+        }).filter(run => run.text);
+        if (!runs.length) {
+          lineSpecs.push({ text: '', size: 12, bold: false, italic: false, color: defaultColor, align: 'l', spacing: 1 });
+          continue;
+        }
+        const align = /algn="(\w+)"/.exec(paragraph)?.[1] ?? 'l';
+        const spacingPct = /<a:lnSpc><a:spcPct val="(\d+)"/.exec(paragraph)?.[1];
+        const spacing = spacingPct ? Math.max(0.8, Number.parseInt(spacingPct, 10) / 100000) : 1;
+        for (const run of runs) {
+          lineSpecs.push({ ...run, align, spacing });
+        }
+      }
+
+      const totalHeight = lineSpecs.reduce((sum, line) => sum + line.size * 1.25 * line.spacing, 0);
+      let cursorY = bodyPr === 'ctr' || bodyPr === 'b'
+        ? boxY + (boxH - totalHeight) / 2 + totalHeight
+        : boxY + boxH;
+      cursorY -= lineSpecs[0] ? lineSpecs[0].size * 0.95 : 14;
+
+      for (const line of lineSpecs) {
+        const font = fontFor(fonts, line.bold, line.italic);
+        const maxWidth = boxW - 8;
+        const segments = wrapLine(font, sanitizeForPdf(line.text), line.size, maxWidth);
+        for (const segment of segments) {
+          const segWidth = font.widthOfTextAtSize(segment, line.size);
+          let x = boxX + 4;
+          if (line.align === 'ctr') x = boxX + (boxW - segWidth) / 2;
+          if (line.align === 'r') x = boxX + boxW - segWidth - 4;
+          if (segment) page.drawText(segment, { x, y: cursorY, size: line.size, font, color: rgb(line.color.r, line.color.g, line.color.b) });
+          cursorY -= line.size * 1.25 * line.spacing;
+        }
+      }
+    }
+
+    // Images: resolve relationship targets and draw fitted inside their frame.
+    for (const pic of matchBlock(xml, 'p:pic')) {
+      const embed = /r:embed="(rId\d+)"/.exec(pic)?.[1];
+      const off = /<a:off x="(\d+)" y="(\d+)"/.exec(pic);
+      const ext = /<a:ext cx="(\d+)" cy="(\d+)"/.exec(pic);
+      const target = embed ? rels.get(embed) : undefined;
+      if (!target || !off || !ext) continue;
+      const entry = zip.file(target);
+      if (!entry) continue;
+      const bytes = await entry.async('uint8array');
+      try {
+        const isPng = bytes[0] === 0x89 && bytes[1] === 0x50;
+        const image = isPng ? await doc.embedPng(bytes) : await doc.embedJpg(bytes);
+        const frameW = Number.parseInt(ext[1], 10) / EMU_PER_PT;
+        const frameH = Number.parseInt(ext[2], 10) / EMU_PER_PT;
+        const natural = image.scale(1);
+        const scale = Math.min(frameW / natural.width, frameH / natural.height);
+        const drawW = natural.width * scale;
+        const drawH = natural.height * scale;
+        page.drawImage(image, {
+          x: Number.parseInt(off[1], 10) / EMU_PER_PT + (frameW - drawW) / 2,
+          y: Number.parseInt(off[2], 10) / EMU_PER_PT + (frameH - drawH) / 2,
+          width: drawW,
+          height: drawH,
+        });
+      } catch { /* unsupported image format inside the deck: skip it, keep converting */ }
+    }
+
+    // Tables: grid with borders and cell text.
+    for (const table of matchBlock(xml, 'a:tbl')) {
+      const cols = [...table.matchAll(/<a:gridCol w="(\d+)"/g)].map(m => Number.parseInt(m[1], 10) / EMU_PER_PT);
+      const rows = matchBlock(table, 'a:tr').map(rowXml =>
+        matchBlock(rowXml, 'a:tc').map(cellXml =>
+          [...cellXml.matchAll(/<a:t>([\s\S]*?)<\/a:t>/g)].map(m => decodeXmlEntities(m[1])).join(' ').trim()));
+      const gridX = /<a:off x="(\d+)" y="(\d+)"/.exec(table);
+      const startX = gridX ? Number.parseInt(gridX[1], 10) / EMU_PER_PT : 36;
+      let startY = gridX ? Number.parseInt(gridX[2], 10) / EMU_PER_PT + 40 : heightPt - 120;
+      const columnCount = Math.max(1, cols.length || (rows[0]?.length ?? 1));
+      const columnWidths = cols.length ? cols : Array.from({ length: columnCount }, () => (widthPt - startX - 36) / columnCount);
+      for (const row of rows) {
+        const cellSize = 11;
+        const rowHeight = cellSize * 1.6;
+        let x = startX;
+        row.forEach((cell, index) => {
+          const width = columnWidths[index] ?? columnWidths[columnWidths.length - 1];
+          page.drawRectangle({ x, y: startY - rowHeight, width, height: rowHeight, borderColor: rgb(0.75, 0.77, 0.8), borderWidth: 0.7 });
+          if (cell) page.drawText(sanitizeForPdf(cell), { x: x + 4, y: startY - rowHeight + 5, size: cellSize, font: fonts.regular, color: rgb(defaultColor.r, defaultColor.g, defaultColor.b) });
+          x += width;
+        });
+        startY -= rowHeight;
+        if (startY < 24) break;
+      }
+    }
+  }
+
+  return savePdf(doc, `${baseName(file.name)}.pdf`, `Converted ${slideFiles.length} slide${slideFiles.length === 1 ? '' : 's'} to PDF pages with positioned text, images, tables, colors and slide backgrounds at the original ${Math.round(widthPt)}×${Math.round(heightPt)} pt slide size.`, [file]);
+}
+
 function xmlEscape(value: string) {
   return value.replace(/[<>&'"]/g, char => ({
     '<': '&lt;',
@@ -1311,18 +1542,6 @@ async function blocksToXlsx(tables: SheetTable[], fileName: string, sourceFiles:
   const bytes = XLSX.write(workbook, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer;
   const blob = new Blob([bytes], { type: xlsxMime });
   return output(fileName, blob, note, sourceFiles);
-}
-
-async function textToPptx(text: string, fileName: string, sourceFiles: File[]) {
-  const zip = new JSZip();
-  const slideText = wrapText(text.replace(/\n+/g, ' '), 90).slice(0, 12).join('\n');
-  zip.file('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/></Types>');
-  zip.folder('_rels')?.file('.rels', '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/></Relationships>');
-  zip.folder('ppt')?.file('presentation.xml', '<?xml version="1.0" encoding="UTF-8"?><p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst><p:sldSz cx="9144000" cy="5143500" type="screen16x9"/></p:presentation>');
-  zip.folder('ppt/_rels')?.file('presentation.xml.rels', '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></Relationships>');
-  zip.folder('ppt/slides')?.file('slide1.xml', `<?xml version="1.0" encoding="UTF-8"?><p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="Extracted text"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="685800" y="685800"/><a:ext cx="7772400" cy="3771900"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz="2400"/><a:t>${xmlEscape(slideText)}</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>`);
-  const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
-  return output(fileName, new Blob([blob], { type: pptxMime }), 'Created a basic PPTX slide from extracted PDF text.', sourceFiles);
 }
 
 async function docxToHtml(file: File) {
@@ -1532,9 +1751,9 @@ export async function processTool(slug: string, files: File[], options: Options)
     case 'excel-to-pdf':
       return htmlToPdf(await xlsxToHtmlBlocks(files[0]), baseName(files[0].name), files);
     case 'powerpoint-to-pdf':
-      return htmlToPdf(await pptxToHtmlBlocks(files[0]), baseName(files[0].name), files);
+      return pptxToPdf(files[0]);
     case 'pdf-to-powerpoint':
-      return textToPptx(await extractPdfText(files[0]), `${baseName(files[0].name)}.pptx`, files);
+      return pdfToPptx(files[0]);
     default:
       return simpleResavePdf(files[0], 'processed', 'Processed the uploaded PDF.');
   }
