@@ -672,8 +672,8 @@ function docxImage(relId: string, widthPt: number, heightPt: number) {
 }
 
 /** Extract embedded images from a pdf.js page as PNG data URLs (best-effort), with page + position info. */
-async function extractPageImages(page: pdfjsLib.PDFPageProxy, pageIndex = 0, pageRefs?: pdfjsLib.PDFPageProxy[]): Promise<Array<{ ref: string; w: number; h: number; dataUrl: string; pageIndex: number; x: number; y: number }>> {
-  const results: Array<{ ref: string; w: number; h: number; dataUrl: string }> = [];
+async function extractPageImages(page: pdfjsLib.PDFPageProxy, pageIndex = 0): Promise<Array<{ ref: string; w: number; h: number; dataUrl: string; pageIndex: number; x: number; y: number }>> {
+  const results: Array<{ ref: string; w: number; h: number; dataUrl: string; pageIndex: number; x: number; y: number }> = [];
   try {
     const opList = await page.getOperatorList();
     const objs = (page as unknown as { objs: { get(id: string, cb: (obj: unknown) => void): void } }).objs;
@@ -756,7 +756,6 @@ async function extractPageImages(page: pdfjsLib.PDFPageProxy, pageIndex = 0, pag
   } catch {
     // Images are best-effort; text conversion must not fail because of them.
   }
-  void pageRefs;
   return results;
 }
 
@@ -954,8 +953,8 @@ export async function pdfToDocx(file: File, options: Options = {}): Promise<Proc
         const bullet = /^[•\u2022\u25CF\u00B7-]\s+/.test(cells[0]) || /^\d+[.)]\s+/.test(cells[0]);
         const heading = rowSize >= medianSize * 1.35 && cells[0].length < 120 && !/[.,;:]$/.test(cells[0]);
         // Per-run bold/italic from the actual PDF fonts (Helvetica-Bold, …).
-        const rowRuns = row.map(item => {
-          const info = fontInfo.get(item.fontName) ?? { bold: false, italic: false };
+        const rowRuns = row.map((item: { str: string; x: number; y: number; w: number; size: number; fontName?: string }) => {
+          const info = fontInfo.get(item.fontName ?? '') ?? { bold: false, italic: false };
           return { text: item.str, size: item.size, bold: info.bold, italic: info.italic };
         });
         // Merge adjacent runs sharing style so Word gets few, clean runs.
@@ -1846,7 +1845,7 @@ export async function docxToPdf(file: File): Promise<ProcessedResult> {
       if (headerFooter.header) {
         const headerText = pdfSafeText(headerFooter.header);
         if (headerText) {
-          stampPage.drawText(headerText, { x: stampPage.margins?.left ?? headerFooter.margins.left, y: stampHeight - Math.min(36, headerFooter.margins.top), size: 9, font: stampFont, color: rgb(0.35, 0.38, 0.42) });
+          stampPage.drawText(headerText, { x: headerFooter.margins.left, y: stampHeight - Math.min(36, headerFooter.margins.top), size: 9, font: stampFont, color: rgb(0.35, 0.38, 0.42) });
         }
       }
       if (headerFooter.footer) {
