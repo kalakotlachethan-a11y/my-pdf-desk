@@ -30,7 +30,8 @@ function getAcceptedTypes(toolId: string): string {
     'jpg-to-pdf': '.jpg,.jpeg',
     'png-to-pdf': '.png',
     'pdf-scanner': '.jpg,.jpeg,.png,.webp',
-    'word-to-pdf': '.doc,.docx',
+    'word-to-pdf': '.docx',
+    'pdf-to-word': '.pdf',
     'excel-to-pdf': '.xls,.xlsx',
     'powerpoint-to-pdf': '.ppt,.pptx',
     'image-compressor': '.jpg,.jpeg,.png,.webp',
@@ -67,6 +68,7 @@ function getDefaultOptions(slug: string): Record<string, string> {
     'digital-signature': { signature: 'Signed with My PDF Desk' },
     'page-numbering': { numberFormat: 'n-of-total', numberPosition: 'bottom-center', numberSize: 'medium' },
     'ocr-pdf': { ocrLang: 'eng' },
+    'pdf-to-word': { mode: 'standard' },
   };
   return map[slug] ?? {};
 }
@@ -825,6 +827,42 @@ export default function ToolPage() {
                     <option value="large">Large (~16 pt)</option>
                   </select>
                 </label>
+              </div>
+            )}
+
+            {slug === 'pdf-to-word' && (
+              <div className="space-y-3">
+                <span className="block text-sm font-medium text-gray-700 dark:text-gray-300">Conversion mode</span>
+                <div className="grid grid-cols-2 gap-2">
+                  {[
+                    ['standard', 'Standard', 'For PDFs with selectable text'],
+                    ['ocr', 'OCR', 'For scanned or image-only PDFs'],
+                  ].map(([value, label, hint]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      onClick={() => setOption('mode', value)}
+                      className={`p-3 rounded-xl text-left transition-all border ${
+                        (options.mode ?? 'standard') === value
+                          ? 'bg-blue-50 dark:bg-blue-950/40 border-blue-300 dark:border-blue-700'
+                          : 'bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800'
+                      }`}
+                    >
+                      <span className="block text-sm font-semibold text-gray-900 dark:text-white">{label}</span>
+                      <span className="block text-xs text-gray-400 mt-0.5">{hint}</span>
+                    </button>
+                  ))}
+                </div>
+                {options.mode === 'ocr' && (
+                  <label className="block">
+                    <span className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">OCR language</span>
+                    <select value={options.ocrLang ?? 'eng'} onChange={e => setOption('ocrLang', e.target.value)} className="w-full px-3 py-2 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white">
+                      {OCR_LANGUAGE_OPTIONS.map(({ code, label }) => <option key={code} value={code}>{label}</option>)}
+                    </select>
+                    <p className="text-xs text-gray-400 mt-1">OCR runs entirely in your browser. The language data downloads once, then it is cached.</p>
+                  </label>
+                )}
+                <p className="text-xs text-gray-400">The output is a real, editable Word document — never a screenshot. If the PDF has no selectable text, Standard mode will ask you to switch to OCR.</p>
               </div>
             )}
 

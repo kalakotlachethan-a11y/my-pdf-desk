@@ -1236,7 +1236,7 @@ export async function processTool(slug: string, files: File[], options: Options)
     case 'ocr-pdf':
       return ocrPdf(files[0], options);
     case 'pdf-to-word':
-      return pdfToDocx(files[0]);
+      return pdfToDocx(files[0], options as Options);
     case 'pdf-to-excel':
       return pdfToXlsx(files[0]);
     case 'word-to-pdf':
