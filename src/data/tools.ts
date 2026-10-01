@@ -4,7 +4,10 @@ import {
   Scissors, GitMerge, RotateCw, Trash2, FileMinus, FileOutput,
   Archive, Shield, Lock, Unlock, Stamp, PenTool, ScanLine,
   FileSearch, Hash, AlignLeft, Layers, Zap, Type, ImagePlus,
-  ShieldCheck, KeyRound,
+  ShieldCheck, KeyRound, Copy, Crop, Grid2x2, Scaling, FileDigit,
+  FileInput, Wrench, Eraser, EyeOff, Info, PenLine, Contrast,
+  Braces, Code2, Table2, FileCode,
+  FileX2, TextCursorInput, ImageDown, ImageOff, FileDiff, Frame,
 } from 'lucide-react';
 
 export interface Tool {
@@ -65,6 +68,29 @@ export const tools: Tool[] = [
   { id: 'upload-signature', label: 'Upload Signature', description: 'Upload your signature image to PDFs', icon: ImagePlus, color: 'text-rose-600', bgColor: 'bg-rose-100 dark:bg-rose-950/40', category: 'Sign' },
   { id: 'verify-signature', label: 'Verify Signature', description: 'Verify digital signature authenticity', icon: ShieldCheck, color: 'text-rose-600', bgColor: 'bg-rose-100 dark:bg-rose-950/40', category: 'Sign', new: true },
   { id: 'digital-signature', label: 'Digital Signature', description: 'Create a certified digital signature', icon: KeyRound, color: 'text-rose-600', bgColor: 'bg-rose-100 dark:bg-rose-950/40', category: 'Sign' },
+  // ---- Stirling-PDF parity tools ----
+  { id: 'overlay-pdfs', label: 'Overlay PDFs', description: 'Stack one PDF on top of another (sequential or interleaved)', icon: Copy, color: 'text-indigo-600', bgColor: 'bg-indigo-100 dark:bg-indigo-950/40', category: 'Organize', new: true },
+  { id: 'crop-pdf', label: 'Crop PDF', description: 'Crop page margins by percentage from each edge', icon: Crop, color: 'text-indigo-600', bgColor: 'bg-indigo-100 dark:bg-indigo-950/40', category: 'Organize', new: true },
+  { id: 'multi-page-layout', label: 'Multi-Page Layout', description: 'Combine pages into grids — 2-up, 4-up and more per sheet', icon: Grid2x2, color: 'text-indigo-600', bgColor: 'bg-indigo-100 dark:bg-indigo-950/40', category: 'Organize', new: true },
+  { id: 'scale-pdf', label: 'Scale Pages', description: 'Enlarge or shrink page content by a percentage', icon: Scaling, color: 'text-indigo-600', bgColor: 'bg-indigo-100 dark:bg-indigo-950/40', category: 'Organize', new: true },
+  { id: 'split-by-size', label: 'Split by Size', description: 'Split a PDF into chunks under a target file size', icon: FileDigit, color: 'text-indigo-600', bgColor: 'bg-indigo-100 dark:bg-indigo-950/40', category: 'Organize', new: true },
+  { id: 'flatten-pdf', label: 'Flatten PDF', description: 'Merge form fields and annotations into page content', icon: FileInput, color: 'text-indigo-600', bgColor: 'bg-indigo-100 dark:bg-indigo-950/40', category: 'Organize', new: true },
+  { id: 'repair-pdf', label: 'Repair PDF', description: 'Fix damaged PDFs by full re-parse and rebuild', icon: Wrench, color: 'text-indigo-600', bgColor: 'bg-indigo-100 dark:bg-indigo-950/40', category: 'Organize', new: true },
+  { id: 'sanitize-pdf', label: 'Sanitize PDF', description: 'Strip JavaScript, metadata, links and embedded files', icon: Eraser, color: 'text-emerald-600', bgColor: 'bg-emerald-100 dark:bg-emerald-950/40', category: 'Security', new: true },
+  { id: 'remove-annotations', label: 'Remove Annotations', description: 'Delete comments, highlights and links from all pages', icon: EyeOff, color: 'text-emerald-600', bgColor: 'bg-emerald-100 dark:bg-emerald-950/40', category: 'Security', new: true },
+  { id: 'edit-metadata', label: 'Edit Metadata', description: 'Change title, author, subject and dates', icon: PenLine, color: 'text-emerald-600', bgColor: 'bg-emerald-100 dark:bg-emerald-950/40', category: 'Security', new: true },
+  { id: 'get-pdf-info', label: 'Get PDF Info', description: 'Inspect pages, fonts, encryption and metadata', icon: Info, color: 'text-emerald-600', bgColor: 'bg-emerald-100 dark:bg-emerald-950/40', category: 'Security', new: true },
+  { id: 'filter-pages', label: 'Adjust Colors', description: 'Grayscale, contrast, brightness and color filters', icon: Contrast, color: 'text-emerald-600', bgColor: 'bg-emerald-100 dark:bg-emerald-950/40', category: 'Security', new: true },
+  { id: 'pdf-to-text', label: 'PDF to Text', description: 'Extract all text into a clean .txt file', icon: Braces, color: 'text-cyan-600', bgColor: 'bg-cyan-100 dark:bg-cyan-950/40', category: 'Convert', new: true },
+  { id: 'pdf-to-html', label: 'PDF to HTML', description: 'Convert to HTML with positioned selectable text', icon: Code2, color: 'text-cyan-600', bgColor: 'bg-cyan-100 dark:bg-cyan-950/40', category: 'Convert', new: true },
+  { id: 'pdf-to-csv-xml', label: 'PDF to CSV/XML', description: 'Export text lines as CSV or XML for spreadsheets', icon: Table2, color: 'text-cyan-600', bgColor: 'bg-cyan-100 dark:bg-cyan-950/40', category: 'Convert', new: true },
+  { id: 'text-to-pdf', label: 'Text/MD/HTML to PDF', description: 'Render text, Markdown or HTML files as PDF', icon: FileCode, color: 'text-cyan-600', bgColor: 'bg-cyan-100 dark:bg-cyan-950/40', category: 'Convert', new: true },
+  { id: 'extract-images', label: 'Extract Images', description: 'Pull all embedded images out of a PDF', icon: ImageDown, color: 'text-cyan-600', bgColor: 'bg-cyan-100 dark:bg-cyan-950/40', category: 'Convert', new: true },
+  { id: 'remove-images', label: 'Remove Images', description: 'Delete raster images, keeping text and vectors', icon: ImageOff, color: 'text-indigo-600', bgColor: 'bg-indigo-100 dark:bg-indigo-950/40', category: 'Organize', new: true },
+  { id: 'remove-blanks', label: 'Remove Blank Pages', description: 'Detect and delete empty pages automatically', icon: FileX2, color: 'text-indigo-600', bgColor: 'bg-indigo-100 dark:bg-indigo-950/40', category: 'Organize', new: true },
+  { id: 'auto-rename', label: 'Auto Rename', description: 'Rename a PDF from its first line of text', icon: TextCursorInput, color: 'text-slate-600', bgColor: 'bg-slate-100 dark:bg-slate-800', category: 'Organize', new: true },
+  { id: 'compare-pdfs', label: 'Compare PDFs', description: 'Diff the text of two PDFs in a report', icon: FileDiff, color: 'text-slate-600', bgColor: 'bg-slate-100 dark:bg-slate-800', category: 'Organize', new: true },
+  { id: 'stamp-pdf', label: 'Stamp', description: 'Stamp text or an image at any page position', icon: Frame, color: 'text-teal-600', bgColor: 'bg-teal-100 dark:bg-teal-950/40', category: 'Security', new: true },
 ];
 
 export const categories = ['All', 'Convert', 'Edit', 'Compress', 'Security', 'Organize', 'Sign'];

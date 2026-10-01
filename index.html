@@ -18,6 +18,11 @@
   </head>
   <body>
     <div id="root"></div>
+    <!-- Fullscreen processing overlay: shown by the cloud conversion engine (src/lib/cloudConvert.ts). -->
+    <div id="processingOverlay" style="display: none;" role="status" aria-live="polite" aria-label="Processing status">
+      <div class="processing-overlay-spinner" aria-hidden="true"></div>
+      <p id="loadingStatusText" class="processing-overlay-status">Uploading file...</p>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

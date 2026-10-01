@@ -4,7 +4,9 @@ import JSZip from 'jszip';
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { createWorker as createOcrWorker } from 'tesseract.js';
 import PptxGenJS from 'pptxgenjs';
-import { docxToPdf, xlsxToPdf, pdfToDocx, pdfToXlsx } from './converters';
+import { xlsxToPdf, pdfToXlsx } from './converters';
+import { convertPdfToDocx } from './pdfWord';
+import { convertDocxToPdf } from './wordPdf';
 import pdfWorkerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
@@ -1181,6 +1183,92 @@ async function verifyResultAsBlob(report: VerifyReport, file: File): Promise<Pro
   };
 }
 
+const docxMime = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+
+/** PDF → Word: layout-aware conversion with OCR fallback for scanned PDFs. */
+async function pdfToWordResult(file: File, options: Options): Promise<ProcessedResult> {
+  const outcome = await convertPdfToDocx(file);
+  if (outcome.scanned && options.mode !== 'ocr') {
+    throw new Error('This PDF appears to be scanned (no selectable text). Switch the conversion mode to OCR to extract the text.');
+  }
+  let blob = outcome.blob;
+  let note = `Converted ${outcome.pageCount} page${outcome.pageCount === 1 ? '' : 's'} into an editable Word document with layout, tables, code blocks and formatting preserved.`;
+  if (options.mode === 'ocr' || !blob) {
+    note = `Ran OCR over ${outcome.pageCount} scanned page${outcome.pageCount === 1 ? '' : 's'} and wrote the recognized text into an editable Word document.`;
+    blob = await ocrPagesToDocx(file, options.lang || 'eng');
+  }
+  return {
+    files: [{ blob, fileName: `${baseName(file.name)}.docx`, mimeType: docxMime }],
+    message: note,
+    originalSize: file.size,
+    newSize: blob.size,
+  };
+}
+
+/** OCR fallback: renders pages and recognizes text into a simple editable DOCX. */
+async function ocrPagesToDocx(file: File, lang: string): Promise<Blob> {
+  const { paraXml, sectPrXml, STYLES_XML, CONTENT_TYPES_XML, ROOT_RELS_XML } = await import('./pdfWord/docxBuilder');
+  const JSZipMod = (await import('jszip')).default;
+  const worker = await createOcrWorker(lang);
+  const doc = await pdfjsLib.getDocument({ data: new Uint8Array(await file.arrayBuffer()), useSystemFonts: true }).promise;
+  const body: string[] = [];
+  try {
+    for (let p = 1; p <= doc.numPages; p++) {
+      const page = await doc.getPage(p);
+      const viewport = page.getViewport({ scale: 2 });
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.floor(viewport.width);
+      canvas.height = Math.floor(viewport.height);
+      await page.render({ canvas, canvasContext: canvas.getContext('2d')!, viewport } as Parameters<typeof page.render>[0]).promise;
+      const result = await worker.recognize(canvas);
+      if (p > 1) body.push('<w:p><w:r><w:br w:type="page"/></w:r></w:p>');
+      for (const line of result.data.text.split(/\n+/)) {
+        if (!line.trim()) continue;
+        body.push(paraXml({
+          runs: [{ text: line, size: 22, bold: false, italic: false, underline: false, font: 'Times New Roman' }],
+          align: 'left', indentTwips: 0, spacingBefore: 0, spacingAfter: 80, lineTwips: null,
+        }));
+      }
+      canvas.width = canvas.height = 0;
+      page.cleanup();
+    }
+  } finally {
+    await worker.terminate();
+    if (typeof (doc as unknown as { destroy?: unknown }).destroy === 'function') {
+      await (doc as unknown as { destroy: () => Promise<void> }).destroy();
+    }
+  }
+  if (!body.length) throw new Error('OCR could not find any readable text in this document.');
+  const zip = new JSZipMod();
+  zip.file('[Content_Types].xml', CONTENT_TYPES_XML);
+  zip.file('_rels/.rels', ROOT_RELS_XML);
+  zip.file('word/styles.xml', STYLES_XML);
+  zip.file('word/document.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body.join('')}${sectPrXml({ width: 11906, height: 16838, landscape: false, margins: { top: 1440, right: 1440, bottom: 1440, left: 1440 }, pageBorders: false })}</w:body></w:document>`);
+  return zip.generateAsync({ type: 'blob', mimeType: docxMime });
+}
+
+/** Word → PDF: genuine conversion with selectable text. */
+async function wordToPdfResult(file: File): Promise<ProcessedResult> {
+  if (/\.doc$/i.test(file.name)) {
+    throw new Error('Legacy .doc files are not supported — please save the document as .docx in Word first.');
+  }
+  const { blob, pageCount } = await convertDocxToPdf(file);
+  return {
+    files: [{ blob, fileName: `${baseName(file.name)}.pdf`, mimeType: pdfMime }],
+    message: `Converted the Word document into a ${pageCount}-page PDF with formatting, tables, images and headers/footers preserved.`,
+    originalSize: file.size,
+    newSize: blob.size,
+  };
+}
+
+import {
+  overlayPdfs, cropPdf, multiPageLayout, scalePdf, splitBySize,
+  flattenPdf, repairPdf, sanitizePdf, removeAnnotations, getPdfInfo,
+  editMetadata, filterPdfPages, pdfToTextTool, pdfToHtml, pdfToCsvXml,
+  textToPdf, extractImages, removeImages, removeBlankPages, autoRenamePdf,
+  comparePdfs, stampPdf,
+} from './stirlingTools';
+
 export async function processTool(slug: string, files: File[], options: Options): Promise<ProcessedResult> {
   ensureFiles(files);
 
@@ -1236,17 +1324,62 @@ export async function processTool(slug: string, files: File[], options: Options)
     case 'ocr-pdf':
       return ocrPdf(files[0], options);
     case 'pdf-to-word':
-      return pdfToDocx(files[0], options as Options);
+      return pdfToWordResult(files[0], options as Options);
     case 'pdf-to-excel':
       return pdfToXlsx(files[0]);
     case 'word-to-pdf':
-      return docxToPdf(files[0]);
+      return wordToPdfResult(files[0]);
     case 'excel-to-pdf':
       return xlsxToPdf(files[0]);
     case 'powerpoint-to-pdf':
       return pptxToPdf(files[0]);
     case 'pdf-to-powerpoint':
       return pdfToPptx(files[0]);
+    // ---- Stirling-PDF parity tools ----
+    case 'overlay-pdfs':
+      return overlayPdfs(files, options);
+    case 'crop-pdf':
+      return cropPdf(files, options);
+    case 'multi-page-layout':
+      return multiPageLayout(files, options);
+    case 'scale-pdf':
+      return scalePdf(files, options);
+    case 'split-by-size':
+      return splitBySize(files, options);
+    case 'flatten-pdf':
+      return flattenPdf(files, options);
+    case 'repair-pdf':
+      return repairPdf(files, options);
+    case 'sanitize-pdf':
+      return sanitizePdf(files, options);
+    case 'remove-annotations':
+      return removeAnnotations(files, options);
+    case 'edit-metadata':
+      return editMetadata(files, options);
+    case 'get-pdf-info':
+      return getPdfInfo(files, options);
+    case 'filter-pages':
+      return filterPdfPages(files, options);
+    case 'pdf-to-text':
+      return pdfToTextTool(files, options);
+    case 'pdf-to-html':
+      return pdfToHtml(files, options);
+    case 'pdf-to-csv-xml':
+      return pdfToCsvXml(files, options);
+    case 'text-to-pdf':
+      return textToPdf(files, options);
+    case 'extract-images':
+      return extractImages(files);
+    case 'remove-images':
+      return removeImages(files, options);
+    case 'remove-blanks':
+      return removeBlankPages(files, options);
+    case 'auto-rename':
+      return autoRenamePdf(files, options);
+    case 'compare-pdfs':
+      return comparePdfs(files, options);
+    case 'stamp-pdf':
+      return stampPdf(files, options);
     default:
       return simpleResavePdf(files[0], 'processed', 'Processed the uploaded PDF.');
   }

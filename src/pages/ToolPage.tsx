@@ -1,27 +1,18 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { Link, useParams, useNavigate } from 'react-router-dom';
-import {
-  Upload, X, Download, CheckCircle, ArrowLeft, FileText, RefreshCw,
-  Loader2, Info, Shield, AlertCircle, PenLine, Undo2, ShieldCheck,
+import { Link, useParams, useNavigate } from 'react-router-dom';import {
+  Download, CheckCircle, ArrowLeft, RefreshCw,
+  Shield, AlertCircle, PenLine, Undo2, ShieldCheck,
 } from 'lucide-react';
+import DropZone from '../components/DropZone';
+import FileQueue, { type QueueFile } from '../components/FileQueue';
+import ProcessingOverlay from '../components/ProcessingOverlay';
+import { formatBytes } from '../components/formatBytes';
 import { getToolBySlug, tools } from '../data/tools';
 import { downloadProcessedFile, processTool, OCR_LANGUAGE_OPTIONS, type ProcessedResult, type VerifyReport } from '../lib/fileTools';
 
 type ProcessingState = 'idle' | 'uploading' | 'processing' | 'done' | 'error';
 
-interface UploadedFile {
-  file: File;
-  preview?: string;
-  id: string;
-}
 
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
-}
 
 function getAcceptedTypes(toolId: string): string {
   const map: Record<string, string> = {
@@ -36,15 +27,13 @@ function getAcceptedTypes(toolId: string): string {
     'powerpoint-to-pdf': '.ppt,.pptx',
     'image-compressor': '.jpg,.jpeg,.png,.webp',
     'add-images': '.pdf,.jpg,.jpeg,.png',
+    'text-to-pdf': '.txt,.md,.html,.htm',
+    'stamp-pdf': '.pdf,.png,.jpg,.jpeg',
   };
   return map[toolId] ?? '.pdf';
 }
 
 /** Extensions accepted for a tool, used to validate drops/picks before processing. */
-function getAllowedExtensions(toolId: string): string[] {
-  return getAcceptedTypes(toolId).split(',').map(ext => ext.trim().toLowerCase());
-}
-
 const SIGNATURE_TOOLS = ['esign-pdf', 'draw-signature', 'upload-signature', 'digital-signature'];
 const SIGNATURE_ACCEPT = '.png,.jpg,.jpeg,.svg,image/png,image/jpeg,image/svg+xml';
 
@@ -69,6 +58,18 @@ function getDefaultOptions(slug: string): Record<string, string> {
     'page-numbering': { numberFormat: 'n-of-total', numberPosition: 'bottom-center', numberSize: 'medium' },
     'ocr-pdf': { ocrLang: 'eng' },
     'pdf-to-word': { mode: 'standard' },
+    // Stirling parity defaults
+    'overlay-pdfs': { overlayMode: 'sequential' },
+    'crop-pdf': { cropTop: '5', cropBottom: '5', cropLeft: '5', cropRight: '5' },
+    'multi-page-layout': { pagesPerSheet: '2' },
+    'scale-pdf': { scaleFactor: '100' },
+    'split-by-size': { maxSizeMb: '5' },
+    'sanitize-pdf': { removeJs: 'true', removeMetadata: 'true', removeEmbedded: 'true', removeLinks: 'false' },
+    'edit-metadata': { metaTitle: '', metaAuthor: '', metaSubject: '', metaKeywords: '' },
+    'filter-pages': { filterMode: 'grayscale', filterContrast: '100', filterBrightness: '100' },
+    'pdf-to-csv-xml': { extractFormat: 'csv' },
+    'text-to-pdf': { fontSize: '12' },
+    'stamp-pdf': { stampText: 'APPROVED', position: '1-1', color: 'black', rotation: '0', pages: 'all', stampImage: 'none' },
   };
   return map[slug] ?? {};
 }
@@ -99,14 +100,12 @@ export default function ToolPage() {
   const navigate = useNavigate();
   const tool = getToolBySlug(slug);
 
-  const [files, setFiles] = useState<UploadedFile[]>([]);
+  const [files, setFiles] = useState<QueueFile[]>([]);
   const [state, setState] = useState<ProcessingState>('idle');
   const [progress, setProgress] = useState(0);
-  const [isDragging, setIsDragging] = useState(false);
   const [options, setOptions] = useState<Record<string, string>>(getDefaultOptions(slug));
   const [result, setResult] = useState<ProcessedResult | null>(null);
   const [error, setError] = useState('');
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [hasSignature, setHasSignature] = useState(false);
   const drawingRef = useRef(false);
@@ -126,24 +125,25 @@ export default function ToolPage() {
     setVerifyReport(null);
     setInkColor('#0f172a');
     strokesRef.current = [];
-    setFiles(prev => {
-      prev.forEach(item => {
-        if (item.preview) URL.revokeObjectURL(item.preview);
+      setFiles(prev => {
+        prev.forEach(item => {
+          if (item.preview) URL.revokeObjectURL(item.preview);
+        });
+        return [];
       });
-      return [];
-    });
-    setState('idle');
-    setProgress(0);
-    setResult(null);
-    setError('');
-  }, [slug]);
+      setState('idle');
+      setProgress(0);
+      setResult(null);
+      setError('');
+    }, [slug]);
 
   const setOption = useCallback((key: string, val: string) => {
     setOptions(prev => ({ ...prev, [key]: val }));
   }, []);
 
+  /** Adds files to the queue; drops stale result state. */
   const handleFiles = useCallback((newFiles: File[]) => {
-    const uploaded = newFiles.map(file => ({
+    const uploaded: QueueFile[] = newFiles.map(file => ({
       file,
       id: Math.random().toString(36).slice(2),
       preview: file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined,
@@ -154,26 +154,31 @@ export default function ToolPage() {
     setError('');
   }, []);
 
-  const onDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragging(false);
-    const droppedFiles = Array.from(e.dataTransfer.files);
-    const allowed = getAllowedExtensions(slug);
-    const rejected = droppedFiles.filter(file => {
-      const ext = `.${file.name.split('.').pop()?.toLowerCase() ?? ''}`;
-      return !allowed.includes(ext) && !allowed.includes(file.type);
-    });
-    const accepted = droppedFiles.filter(file => !rejected.includes(file));
-    if (accepted.length) handleFiles(accepted);
-    if (rejected.length) {
-      setError(`Skipped ${rejected.length} unsupported file${rejected.length > 1 ? 's' : ''}: ${rejected.map(f => f.name).join(', ').slice(0, 80)}${rejected.map(f => f.name).join(', ').length > 80 ? '…' : ''} — this tool accepts ${acceptedLabel(getAcceptedTypes(slug))}.`);
-    }
-  }, [handleFiles, slug]);
+  /** Extension guard: blocks mismatches and surfaces an accessible alert. */
+  const rejectFiles = useCallback((rejected: File[]) => {
+    const names = rejected.map(f => f.name).join(', ');
+    setError(`Unsupported file${rejected.length > 1 ? 's' : ''}: ${names.slice(0, 120)}${names.length > 120 ? '…' : ''}. This tool accepts ${acceptedLabel(getAcceptedTypes(slug))} files only.`);
+    setState('error');
+  }, [slug]);
 
-  const onInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files?.length) handleFiles(Array.from(e.target.files));
-    e.target.value = '';
-  };
+  const reorderFiles = useCallback((from: number, to: number) => {
+    setFiles(prev => {
+      const next = [...prev];
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved);
+      return next;
+    });
+  }, []);
+
+  /** Hard purge: revoke every preview URL and empty the queue. */
+  const purgeFiles = useCallback(() => {
+    setFiles(prev => {
+      prev.forEach(item => {
+        if (item.preview) URL.revokeObjectURL(item.preview);
+      });
+      return [];
+    });
+  }, []);
 
   const removeFile = (id: string) => {
     setFiles(prev => {
@@ -229,16 +234,25 @@ export default function ToolPage() {
   };
 
   const reset = () => {
-    files.forEach(item => {
-      if (item.preview) URL.revokeObjectURL(item.preview);
-    });
-    setFiles([]);
+    purgeFiles();
     setState('idle');
     setProgress(0);
     setResult(null);
     setError('');
     setOptions(getDefaultOptions(slug));
     setHasSignature(false);
+  };
+
+  /** Downloads results, then immediately purges blobs + queue (confidentiality). */
+  const downloadAndPurge = () => {
+    if (!result) return;
+    result.files.forEach(downloadProcessedFile);
+    // downloadProcessedFile revokes each URL after 500ms; queue purge runs now.
+    purgeFiles();
+    setState('idle');
+    setResult(null);
+    setProgress(0);
+    setError('');
   };
 
   const getCanvasPoint = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -412,74 +426,25 @@ export default function ToolPage() {
         )}
 
         {(state === 'idle' || state === 'error' || files.length === 0) && (
-          <div
-            className={`upload-zone ${isDragging ? 'border-blue-500 bg-blue-100 dark:bg-blue-900/40 scale-[1.01]' : ''}`}
-            onClick={() => fileInputRef.current?.click()}
-            onDragOver={e => { e.preventDefault(); setIsDragging(true); }}
-            onDragLeave={() => setIsDragging(false)}
-            onDrop={onDrop}
-          >
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
-              accept={acceptedTypes}
-              className="hidden"
-              onChange={onInputChange}
-            />
-            <div className={`w-16 h-16 rounded-2xl ${isDragging ? 'gradient-bg' : 'bg-blue-100 dark:bg-blue-950/50'} flex items-center justify-center transition-colors`}>
-              <Upload size={28} className={isDragging ? 'text-white' : 'text-blue-600'} />
-            </div>
-            <div className="text-center">
-              <p className="text-lg font-semibold text-gray-700 dark:text-gray-300">
-                {isDragging ? 'Drop it here!' : 'Drop files here or click to upload'}
-              </p>
-              <p className="text-sm text-gray-400 mt-1">Supports {acceptedLabel(acceptedTypes)} files</p>
-            </div>
-            <div className="flex items-center gap-2 text-xs text-gray-400">
-              <Info size={13} />
-              Files are processed in your browser session
-            </div>
-          </div>
+          <DropZone
+            accept={acceptedTypes}
+            acceptLabel={acceptedLabel(acceptedTypes)}
+            onFiles={handleFiles}
+            onRejected={rejectFiles}
+          />
         )}
 
         {files.length > 0 && (
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <h3 className="font-semibold text-gray-900 dark:text-white">{files.length} file{files.length > 1 ? 's' : ''} selected</h3>
-              {(state === 'idle' || state === 'error') && (
-                <button
-                  onClick={() => fileInputRef.current?.click()}
-                  className="text-sm text-blue-600 dark:text-blue-400 hover:underline flex items-center gap-1"
-                >
-                  <Upload size={14} /> Add more
-                </button>
-              )}
-            </div>
-            <input ref={fileInputRef} type="file" multiple accept={acceptedTypes} className="hidden" onChange={onInputChange} />
-            {files.map(({ file, preview, id }) => (
-              <div key={id} className="flex items-center gap-3 p-4 rounded-xl bg-gray-50 dark:bg-gray-800 border border-gray-100 dark:border-gray-700">
-                {preview ? (
-                  <img src={preview} alt="" className="w-12 h-12 rounded-lg object-cover flex-shrink-0" />
-                ) : (
-                  <div className="w-12 h-12 rounded-lg bg-blue-100 dark:bg-blue-950/50 flex items-center justify-center flex-shrink-0">
-                    <FileText size={22} className="text-blue-600" />
-                  </div>
-                )}
-                <div className="flex-1 min-w-0">
-                  <p className="font-medium text-gray-900 dark:text-white truncate">{file.name}</p>
-                  <p className="text-sm text-gray-400">{formatBytes(file.size)}</p>
-                </div>
-                {(state === 'idle' || state === 'error') && (
-                  <button onClick={() => removeFile(id)} className="p-2 rounded-lg hover:bg-red-50 dark:hover:bg-red-950/30 text-gray-400 hover:text-red-500 transition-colors">
-                    <X size={18} />
-                  </button>
-                )}
-                {(state === 'uploading' || state === 'processing') && <Loader2 size={18} className="text-blue-500 animate-spin" />}
-                {state === 'done' && <CheckCircle size={18} className="text-emerald-500" />}
-              </div>
-            ))}
-          </div>
+          <FileQueue
+            files={files}
+            accept={acceptedTypes}
+            busy={state === 'uploading' || state === 'processing'}
+            done={state === 'done'}
+            onAdd={handleFiles}
+            onRejected={rejectFiles}
+            onRemove={removeFile}
+            onReorder={reorderFiles}
+          />
         )}
 
         {(state === 'idle' || state === 'error') && files.length > 0 && (
@@ -581,6 +546,133 @@ export default function ToolPage() {
                   className="w-full px-3 py-2 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white"
                 />
               </label>
+            )}
+
+            {/* ---- Stirling parity tool options ---- */}
+            {slug === 'overlay-pdfs' && (
+              <label className="block">
+                <span className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Overlay mode</span>
+                <select value={options.overlayMode ?? 'sequential'} onChange={e => setOption('overlayMode', e.target.value)} className="w-full px-3 py-2 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white">
+                  <option value="sequential">Sequential — overlay file N onto file 1's pages</option>
+                  <option value="interleaved">Interleaved — alternate overlay pages with base pages</option>
+                </select>
+              </label>
+            )}
+            {slug === 'crop-pdf' && (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                {(['cropTop', 'cropBottom', 'cropLeft', 'cropRight'] as const).map(key => (
+                  <label key={key} className="block">
+                    <span className="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1 capitalize">{key.replace('crop', '')} %</span>
+                    <input type="number" min={0} max={45} value={options[key] ?? '5'} onChange={e => setOption(key, e.target.value)} className="w-full px-3 py-2 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white" />
+                  </label>
+                ))}
+              </div>
+            )}
+            {slug === 'multi-page-layout' && (
+              <label className="block">
+                <span className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Pages per sheet</span>
+                <select value={options.pagesPerSheet ?? '2'} onChange={e => setOption('pagesPerSheet', e.target.value)} className="w-full px-3 py-2 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white">
+                  {['2', '3', '4', '6', '9'].map(n => <option key={n} value={n}>{n} pages per sheet</option>)}
+                </select>
+              </label>
+            )}
+            {slug === 'scale-pdf' && (
+              <label className="block">
+                <span className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Scale factor %</span>
+                <input type="number" min={10} max={400} value={options.scaleFactor ?? '100'} onChange={e => setOption('scaleFactor', e.target.value)} className="w-full px-3 py-2 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white" />
+                <p className="text-xs text-gray-400 mt-1">100 = unchanged; 50 halves content; 200 doubles it.</p>
+              </label>
+            )}
+            {slug === 'split-by-size' && (
+              <label className="block">
+                <span className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Target size (MB per output file)</span>
+                <input type="number" min={0.1} step={0.1} value={options.maxSizeMb ?? '5'} onChange={e => setOption('maxSizeMb', e.target.value)} className="w-full px-3 py-2 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white" />
+              </label>
+            )}
+            {slug === 'sanitize-pdf' && (
+              <div className="space-y-2">
+                {[['removeJs', 'Remove JavaScript actions'], ['removeMetadata', 'Remove metadata'], ['removeEmbedded', 'Remove embedded files'], ['removeLinks', 'Remove link annotations']].map(([key, label]) => (
+                  <label key={key} className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+                    <input type="checkbox" checked={options[key] !== 'false'} onChange={e => setOption(key, String(e.target.checked))} className="w-4 h-4 accent-blue-600" />
+                    {label}
+                  </label>
+                ))}
+              </div>
+            )}
+            {slug === 'edit-metadata' && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {([['metaTitle', 'Title'], ['metaAuthor', 'Author'], ['metaSubject', 'Subject'], ['metaKeywords', 'Keywords']] as const).map(([key, label]) => (
+                  <label key={key} className="block">
+                    <span className="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">{label}</span>
+                    <input value={options[key] ?? ''} onChange={e => setOption(key, e.target.value)} className="w-full px-3 py-2 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white" />
+                  </label>
+                ))}
+              </div>
+            )}
+            {slug === 'filter-pages' && (
+              <div className="space-y-3">
+                <label className="block">
+                  <span className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Filter</span>
+                  <select value={options.filterMode ?? 'grayscale'} onChange={e => setOption('filterMode', e.target.value)} className="w-full px-3 py-2 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white">
+                    <option value="grayscale">Grayscale</option>
+                    <option value="invert">Invert colors</option>
+                    <option value="contrast">Contrast boost</option>
+                    <option value="brightness">Brightness boost</option>
+                  </select>
+                </label>
+                {(options.filterMode === 'contrast' || options.filterMode === 'brightness') && (
+                  <label className="block">
+                    <span className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Amount %</span>
+                    <input type="number" min={50} max={200} value={options.filterAmount ?? '130'} onChange={e => setOption('filterAmount', e.target.value)} className="w-full px-3 py-2 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white" />
+                  </label>
+                )}
+              </div>
+            )}
+            {slug === 'pdf-to-csv-xml' && (
+              <label className="block">
+                <span className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Output format</span>
+                <select value={options.extractFormat ?? 'csv'} onChange={e => setOption('extractFormat', e.target.value)} className="w-full px-3 py-2 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white">
+                  <option value="csv">CSV</option>
+                  <option value="xml">XML</option>
+                </select>
+              </label>
+            )}
+            {slug === 'text-to-pdf' && (
+              <label className="block">
+                <span className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Base font size</span>
+                <input type="number" min={8} max={24} value={options.fontSize ?? '12'} onChange={e => setOption('fontSize', e.target.value)} className="w-full px-3 py-2 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white" />
+              </label>
+            )}
+            {slug === 'stamp-pdf' && (
+              <div className="space-y-3">
+                <label className="block">
+                  <span className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Stamp text</span>
+                  <input value={options.stampText ?? ''} onChange={e => setOption('stampText', e.target.value)} placeholder="Leave blank when stamping an image" className="w-full px-3 py-2 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white" />
+                </label>
+                <div className="grid grid-cols-2 gap-3">
+                  <label className="block">
+                    <span className="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">Position</span>
+                    <select value={options.position ?? '1-1'} onChange={e => setOption('position', e.target.value)} className="w-full px-3 py-2 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white">
+                      <option value="0-0">Bottom left</option>
+                      <option value="1-0">Bottom center</option>
+                      <option value="2-0">Bottom right</option>
+                      <option value="0-1">Middle left</option>
+                      <option value="1-1">Center</option>
+                      <option value="2-1">Middle right</option>
+                      <option value="0-2">Top left</option>
+                      <option value="1-2">Top center</option>
+                      <option value="2-2">Top right</option>
+                    </select>
+                  </label>
+                  <label className="block">
+                    <span className="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">Apply to</span>
+                    <select value={options.pages ?? 'all'} onChange={e => setOption('pages', e.target.value)} className="w-full px-3 py-2 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white">
+                      <option value="all">All pages</option>
+                      <option value="first">First page only</option>
+                    </select>
+                  </label>
+                </div>
+              </div>
             )}
 
             {showSignatureInput && (
@@ -904,22 +996,15 @@ export default function ToolPage() {
           </div>
         )}
 
-        {(state === 'uploading' || state === 'processing') && (
-          <div className="p-6 rounded-2xl bg-blue-50 dark:bg-blue-950/30 border border-blue-100 dark:border-blue-900">
-            <div className="flex items-center justify-between mb-3">
-              <span className="font-medium text-blue-700 dark:text-blue-300">
-                {state === 'uploading' ? 'Preparing...' : 'Processing...'}
-              </span>
-              <span className="font-bold text-blue-700 dark:text-blue-300">{Math.round(progress)}%</span>
-            </div>
-            <div className="h-3 bg-blue-200 dark:bg-blue-900 rounded-full overflow-hidden">
-              <div className="h-full gradient-bg rounded-full transition-all duration-100" style={{ width: `${progress}%` }} />
-            </div>
-            <p className="text-sm text-blue-500 dark:text-blue-400 mt-3">
-              {state === 'uploading' ? 'Reading your local file...' : `Applying ${tool.label.toLowerCase()}...`}
-            </p>
-          </div>
-        )}
+        <ProcessingOverlay
+          active={state === 'uploading' || state === 'processing' || state === 'done'}
+          progress={progress}
+          statusText={state === 'uploading' ? 'Reading your local files…' : `Applying ${tool.label.toLowerCase()}…`}
+          toolLabel={tool.label}
+          result={state === 'done' ? result : null}
+          onDownloadAndReset={downloadAndPurge}
+          onResetOnly={reset}
+        />
 
         {state === 'error' && (
           <div className="p-5 rounded-2xl bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900">
@@ -955,7 +1040,7 @@ export default function ToolPage() {
               </div>
             </div>
             <div className="flex flex-col sm:flex-row gap-3">
-              <button onClick={() => result.files.forEach(downloadProcessedFile)} className="btn-primary flex-1 justify-center">
+              <button onClick={downloadAndPurge} className="btn-primary flex-1 justify-center">
                 <Download size={18} /> Download {result.files.length > 1 ? 'Results' : 'Result'}
               </button>
               <button onClick={reset} className="btn-secondary flex items-center gap-2 justify-center">
