@@ -12,6 +12,8 @@
   },
   "dependencies": {
     "@cantoo/pdf-lib": "^2.11.0",
+    "@google/generative-ai": "^0.24.1",
+    "@napi-rs/canvas": "^1.0.9",
     "@supabase/supabase-js": "^2.57.4",
     "exceljs": "^4.4.0",
     "jszip": "^3.10.1",
@@ -20,6 +22,7 @@
     "pdf-lib": "^1.17.1",
     "pdf-parse": "^2.4.5",
     "pdfjs-dist": "^6.3.289",
+    "pdfjs-dist5": "npm:pdfjs-dist@5.4.296",
     "pptxgenjs": "^4.0.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

@@ -64,6 +64,45 @@ const ENDPOINT = '/api/parse-pdf';
 const MAX_UPLOAD_BYTES = 40 * 1024 * 1024; // matches the server guard
 const TIMEOUT_MS = 90_000; // large scanned PDFs can take a while server-side
 
+/**
+ * Vision path: send rendered page images (base64 JPEG data URLs) to the
+ * serverless function, which runs Gemini multimodal extraction and returns a
+ * structured markdown document. null = vision unavailable/failed → local OCR.
+ */
+export interface VisionDoc {
+  ok: true;
+  numpages: number;
+  model: string;
+  markdown: string;
+}
+
+export async function parsePdfPagesViaVision(pages: string[]): Promise<VisionDoc | null> {
+  try {
+    if (!pages.length) return null;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 120_000);
+    let res: Response;
+    try {
+      res = await fetch(ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pages }),
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!res.ok) return null;
+    const contentType = res.headers.get('content-type') ?? '';
+    if (!contentType.includes('application/json')) return null;
+    const data = (await res.json()) as Partial<VisionDoc> | null;
+    if (!data || data.ok !== true || typeof data.markdown !== 'string' || data.markdown.length < 10) return null;
+    return { ok: true, numpages: data.numpages ?? pages.length, model: data.model ?? 'gemini', markdown: data.markdown };
+  } catch {
+    return null;
+  }
+}
+
 /** Try server-side parsing; null means "fall back to local processing". */
 export async function parsePdfViaApi(file: File): Promise<ApiPdfDoc | null> {
   try {
